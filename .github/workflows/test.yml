@@ -1,0 +1,22 @@
+# The C library in double, float and float without the point cache, the C example, and the Python
+# binding built and run without an arm, on Linux and macOS.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: make test
+      - run: make example
+      - run: uv sync
+      - run: uv run examples/kinematics.py

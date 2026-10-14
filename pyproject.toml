@@ -1,0 +1,39 @@
+[project]
+name = "so101ik"
+version = "0.1.0"
+description = "Inverse kinematics and a safe driver for the SO-101 arm (LeRobot) in C: RobotKinematics 3.7-42x faster, Python binding, ESP32-ready"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Stepan Kandrushin" }]
+requires-python = ">=3.12"
+dependencies = ["numpy>=1.26"]
+keywords = ["so101", "so-101", "so-arm101", "so-arm100", "lerobot", "inverse-kinematics", "kinematics",
+            "robot-arm", "feetech", "esp32"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.urls]
+Homepage = "https://github.com/stepankandrushin/lerobot-so101-inverse-kinematics"
+Issues = "https://github.com/stepankandrushin/lerobot-so101-inverse-kinematics/issues"
+
+[build-system]
+requires = ["setuptools>=77", "numpy>=2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["so101ik"]
+
+[tool.uv]
+# The extension is rebuilt when any of its sources changes (uv otherwise keeps the build it has).
+cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "src/*.c" }, { file = "src/*.h" },
+              { file = "include/*.h" }, { file = "python/so101ik/*.c" }]
