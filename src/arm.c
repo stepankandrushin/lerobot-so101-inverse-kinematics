@@ -8,7 +8,9 @@
  * A joint more than lag_max behind its goal with under 0.5 degrees of progress in 0.3 s, or above
  * load_max for 0.3 s, or hal.stop(), stops the move: every goal goes to where its joint stands and the
  * call returns the error. A straight tip line goes through the least-loaded pose near the one before
- * every 2 mm (so101_ik_near). */
+ * every 2 mm (so101_ik_near). Every move is one call that runs whole here, its data given at the start
+ * (a target, a chain of poses, the gripper's rate), so a board can run it from a command that came over
+ * a link. */
 #include <stdio.h>
 #include <string.h>
 #include "so101ik_internal.h"
@@ -63,6 +65,10 @@ void so101_arm_init(so101_arm *a, const so101_hal *hal, const so101_servo_cal ca
     a->sag = (so101_real)3.7;
     a->acceleration = 254;
     a->torque_limit = 500;
+    a->lead_rate = 5;
+    a->lead_max = (so101_real)1.6;
+    a->lead_min = (so101_real)0.1;
+    a->start_max = 5;
     a->t0 = hal->now_us(hal->ctx);
     const so101_real *lo = a->model.lo, *hi = a->model.hi;
     so101_real flex = FOLD_FLEX < hi[SO101_FLEX] - 3 ? FOLD_FLEX : hi[SO101_FLEX] - 3;
@@ -226,6 +232,7 @@ int so101_arm_torque_on(so101_arm *a) {
         }
     }
     a->torque = 1;
+    memset(a->lead, 0, sizeof a->lead);
     a->hal.sleep_us(a->hal.ctx, 500000);
     int now[SO101_NJ];
     if ((rc = read_raw_positions(a, STS_PRESENT_POSITION, now))) return rc;
@@ -270,68 +277,206 @@ static int freeze(so101_arm *a, int code, const char *why) {
     return fail(a, code, "%s", why);
 }
 
-typedef void (*path_fn)(so101_arm *a, void *ctx, so101_real s, so101_real goal[SO101_NJ]);
+/* ---- the ticks of a move --------------------------------------------------------------------- */
 
 #define HIST 64
+#define HIST_EVERY 0.01        /* s between the positions kept for the stall rule, so 0.3 s fit at any tick */
 
-/* Send path(s) for s on a minimum-jerk profile over duration seconds, then hold for settle. */
-static int follow(so101_arm *a, path_fn path, void *ctx, double duration, double settle) {
-    double th[HIST];
+/* What the ticks of one move keep: the deadlines, the positions of the last WINDOW seconds, since when each
+ * joint has been over load_max, and the last reading. */
+typedef struct {
+    int free_load;             /* a joint the overload rule leaves alone (a grasp's gripper), or -1 */
+    uint64_t start, next;
+    double th[HIST], kept;
     so101_real ph[HIST][SO101_NJ], high[SO101_NJ];
-    int h0 = 0, hn = 0;
-    for (int j = 0; j < SO101_NJ; j++) high[j] = -1;
-    uint64_t start = a->hal.now_us(a->hal.ctx), next = start;
-    for (;;) {
-        uint64_t now = a->hal.now_us(a->hal.ctx);
-        double t = (double)(now - start) / 1e6;
-        if (a->hal.stop && a->hal.stop(a->hal.ctx)) return freeze(a, SO101_ESTOP, "stop asked for");
-        int done = t >= duration + settle;
-        path(a, ctx, minjerk((so101_real)(t / duration)), a->goal);
-        int rc = send_goals(a, a->goal);
-        so101_real pos[SO101_NJ], load[SO101_NJ], ma[SO101_NJ];
-        if (!rc) rc = so101_arm_read(a, pos, load, ma);
-        if (rc) return freeze(a, rc, a->err);
-        if (a->hal.tick) {
-            so101_tick k = {secs(a), a->step};
-            memcpy(k.goal, a->goal, sizeof k.goal);
-            memcpy(k.pos, pos, sizeof k.pos);
-            memcpy(k.load, load, sizeof k.load);
-            memcpy(k.ma, ma, sizeof k.ma);
-            so101_tip(&a->model, pos, k.tip, NULL);
-            for (int i = 0; i < 3; i++) k.target[i] = a->have_target ? a->target[i] : (so101_real)NAN;
-            a->hal.tick(a->hal.ctx, &k);
-        }
-        /* positions of the last WINDOW seconds */
-        if (hn == HIST) h0 = (h0 + 1) % HIST, hn--;
-        int k = (h0 + hn) % HIST;
-        th[k] = t;
-        memcpy(ph[k], pos, sizeof pos);
-        hn++;
-        while (hn > 1 && t - th[(h0 + 1) % HIST] >= WINDOW) h0 = (h0 + 1) % HIST, hn--;
-        for (int j = 0; j < SO101_NJ; j++) {
-            so101_real lag = a->goal[j] - pos[j];
-            if (j != SO101_GRIP && RFABS(lag) > a->lag_max && t - th[h0] >= WINDOW && RFABS(pos[j] - ph[h0][j]) < (so101_real)0.5) {
-                char why[120];
-                snprintf(why, sizeof why, "%s stalled %+.1f degrees behind its goal, load %+.1f %%", SHORT[j], (double)lag,
-                         (double)load[j]);
-                return freeze(a, SO101_ESTALL, why);
-            }
-            if (RFABS(load[j]) > a->load_max) {
-                if (high[j] < 0) high[j] = (so101_real)t;
-                if (t - high[j] >= WINDOW) {
-                    char why[120];
-                    snprintf(why, sizeof why, "%s load %+.1f %% for %.1f s", SHORT[j], (double)load[j], WINDOW);
-                    return freeze(a, SO101_ELOAD, why);
-                }
-            } else high[j] = -1;
-        }
-        if (done) return SO101_OK;
-        /* the next tick on its own deadline, so a late wake-up does not push back the ones after it */
-        next += a->tick_us;
-        uint64_t after = a->hal.now_us(a->hal.ctx);
-        if (next > after) a->hal.sleep_us(a->hal.ctx, (uint32_t)(next - after));
-        else next = after;
+    int h0, hn;
+    so101_real pos[SO101_NJ], load[SO101_NJ], ma[SO101_NJ];
+} ticks;
+
+static void ticks_start(so101_arm *a, ticks *k) {
+    memset(k, 0, sizeof *k);
+    k->free_load = -1;
+    for (int j = 0; j < SO101_NJ; j++) k->high[j] = -1;
+    k->start = k->next = a->hal.now_us(a->hal.ctx);
+}
+
+static double ticks_now(so101_arm *a, const ticks *k) { return (double)(a->hal.now_us(a->hal.ctx) - k->start) / 1e6; }
+
+static int stop_asked(so101_arm *a) { return a->hal.stop && a->hal.stop(a->hal.ctx); }
+
+/* One tick, t s into the move: a->goal out, the servos read, the tick reported, the stall and overload rules
+ * applied. */
+static int tick(so101_arm *a, ticks *k, double t) {
+    int rc = send_goals(a, a->goal);
+    if (!rc) rc = so101_arm_read(a, k->pos, k->load, k->ma);
+    if (rc) return freeze(a, rc, a->err);
+    if (a->hal.tick) {
+        so101_tick r = {secs(a), a->step};
+        memcpy(r.goal, a->goal, sizeof r.goal);
+        memcpy(r.pos, k->pos, sizeof r.pos);
+        memcpy(r.load, k->load, sizeof r.load);
+        memcpy(r.ma, k->ma, sizeof r.ma);
+        so101_tip(&a->model, k->pos, r.tip, NULL);
+        for (int i = 0; i < 3; i++) r.target[i] = a->have_target ? a->target[i] : (so101_real)NAN;
+        a->hal.tick(a->hal.ctx, &r);
     }
+    if (!k->hn || t - k->kept >= HIST_EVERY) {
+        if (k->hn == HIST) k->h0 = (k->h0 + 1) % HIST, k->hn--;
+        int i = (k->h0 + k->hn) % HIST;
+        k->th[i] = t;
+        memcpy(k->ph[i], k->pos, sizeof k->pos);
+        k->hn++;
+        k->kept = t;
+    }
+    /* h0: the newest position at least WINDOW old, or the first */
+    while (k->hn > 1 && t - k->th[(k->h0 + 1) % HIST] >= WINDOW) k->h0 = (k->h0 + 1) % HIST, k->hn--;
+    for (int j = 0; j < SO101_NJ; j++) {
+        so101_real lag = a->goal[j] - k->pos[j];
+        if (j != SO101_GRIP && RFABS(lag) > a->lag_max && t - k->th[k->h0] >= WINDOW
+            && RFABS(k->pos[j] - k->ph[k->h0][j]) < (so101_real)0.5) {
+            char why[120];
+            snprintf(why, sizeof why, "%s stalled %+.1f degrees behind its goal, load %+.1f %%", SHORT[j], (double)lag,
+                     (double)k->load[j]);
+            return freeze(a, SO101_ESTALL, why);
+        }
+        if (j != k->free_load && RFABS(k->load[j]) > a->load_max) {
+            if (k->high[j] < 0) k->high[j] = (so101_real)t;
+            if (t - k->high[j] >= WINDOW) {
+                char why[120];
+                snprintf(why, sizeof why, "%s load %+.1f %% for %.1f s", SHORT[j], (double)k->load[j], WINDOW);
+                return freeze(a, SO101_ELOAD, why);
+            }
+        } else k->high[j] = -1;
+    }
+    return SO101_OK;
+}
+
+/* Sleep to the next tick's deadline, start + k tick, so a late wake-up does not push back the ones after it. */
+static void tick_wait(so101_arm *a, ticks *k) {
+    k->next += a->tick_us;
+    uint64_t now = a->hal.now_us(a->hal.ctx);
+    if (k->next > now) a->hal.sleep_us(a->hal.ctx, (uint32_t)(k->next - now));
+    else k->next = now;
+}
+
+/* The goals as they are for s seconds (one tick at least). */
+static int hold(so101_arm *a, ticks *k, double s) {
+    double t0 = ticks_now(a, k);
+    for (;;) {
+        double t = ticks_now(a, k);
+        if (stop_asked(a)) return freeze(a, SO101_ESTOP, "stop asked for");
+        int rc = tick(a, k, t);
+        if (rc) return rc;
+        if (t - t0 >= s) return SO101_OK;
+        tick_wait(a, k);
+    }
+}
+
+/* ---- moves along a path ---------------------------------------------------------------------- */
+
+/* The wanted angles at s, 0 to 1 along a move. */
+typedef void (*path_fn)(so101_arm *a, void *ctx, so101_real s, so101_real want[SO101_NJ]);
+
+typedef struct {
+    path_fn path;
+    void *ctx;
+    double duration;
+    so101_follow o;
+} motion;
+
+void so101_follow_init(so101_follow *o) {
+    memset(o, 0, sizeof *o);
+    o->speed = (so101_real)0.03;
+    o->settle = (so101_real)0.3;
+    o->free_from = (so101_real)0.15;
+    o->free_to = (so101_real)0.5;
+    o->press_ticks = 3;
+}
+
+/* Each of pan to wrist flex led ahead of its wanted angle by what it has lagged (pos: the last reading,
+ * NULL for none yet), dt s after the tick before. */
+static void lead(so101_arm *a, so101_real goal[SO101_NJ], const so101_real *pos, so101_real dt) {
+    for (int j = 0; j < 4; j++) {
+        if (pos) {
+            so101_real err = goal[j] - pos[j];
+            if (RFABS(err) > a->lead_min) a->lead[j] += a->lead_rate * dt * err;
+            if (a->lead[j] > a->lead_max) a->lead[j] = a->lead_max;
+            if (a->lead[j] < -a->lead_max) a->lead[j] = -a->lead_max;
+        }
+        goal[j] += a->lead[j];
+    }
+}
+
+static so101_real median(so101_real *v, int n) {
+    for (int i = 1; i < n; i++)
+        for (int k = i; k > 0 && v[k - 1] > v[k]; k--) {
+            so101_real x = v[k];
+            v[k] = v[k - 1];
+            v[k - 1] = x;
+        }
+    return n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+}
+
+#define FREE_MAX 512           /* readings of the free stretch a contact stop keeps */
+
+/* Along a path over m->duration, then the hold (or, with a press, until contact and the let-off). */
+static int run(so101_arm *a, const motion *m) {
+    static so101_real free_gap[FREE_MAX];
+    const so101_follow *o = &m->o;
+    ticks k;
+    ticks_start(a, &k);
+    so101_real want[SO101_NJ], base = 0;
+    int nfree = 0, hits = 0, read = 0, based = 0;
+    double last = 0;
+    a->contact = 0;
+    for (;;) {
+        double t = ticks_now(a, &k), f = t / m->duration;
+        if (f > 1) f = 1;
+        if (stop_asked(a)) return freeze(a, SO101_ESTOP, "stop asked for");
+        m->path(a, m->ctx, o->steady ? (so101_real)f : minjerk((so101_real)f), want);
+        memcpy(a->goal, want, sizeof want);
+        if (o->lead) lead(a, a->goal, read ? k.pos : NULL, (so101_real)(t - last));
+        last = t;
+        int rc = tick(a, &k, t);
+        if (rc) return rc;
+        read = 1;
+        if (o->press > 0) {
+            so101_real at[3];
+            so101_tip(&a->model, k.pos, at, NULL);
+            so101_real gap = at[2] - a->target[2];    /* how far the tip stands above the goals' tip */
+            if (f > o->free_from && f < o->free_to) {
+                if (nfree < FREE_MAX) free_gap[nfree++] = gap;
+            } else if (f >= o->free_to && nfree) {
+                if (!based) base = median(free_gap, nfree), based = 1;
+                hits = gap - base > o->press ? hits + 1 : 0;
+                if (hits >= o->press_ticks) {
+                    a->contact = 1;
+                    break;
+                }
+            }
+            if (f >= 1) break;
+        } else if (t >= m->duration) {
+            if (t >= m->duration + o->settle) break;
+            if (o->within > 0) {
+                so101_real off = 0;
+                for (int j = 0; j < 4; j++)
+                    if (RFABS(want[j] - k.pos[j]) > off) off = RFABS(want[j] - k.pos[j]);
+                if (off < o->within) break;
+            }
+        }
+        tick_wait(a, &k);
+    }
+    if (o->press > 0) {
+        /* let off: the goals where the joints stand, so the arm stops pressing */
+        so101_real grip = a->goal[SO101_GRIP];
+        memcpy(a->goal, k.pos, sizeof k.pos);
+        a->goal[SO101_GRIP] = grip;
+        memset(a->lead, 0, sizeof a->lead);
+        say(a, "    %s: %s; the goals where the joints stand", a->step, a->contact ? "contact" : "the end, no contact");
+        tick_wait(a, &k);
+        return hold(a, &k, o->settle);
+    }
+    return SO101_OK;
 }
 
 /* What the straight joint path from p to q runs into at 30 points: a joint past its range, an axis near
@@ -358,9 +503,9 @@ static int clear_path(so101_arm *a, const so101_real p[SO101_NJ], const so101_re
 
 typedef struct { so101_real from[SO101_NJ], to[SO101_NJ]; } joints_t;
 
-static void joints_path(so101_arm *a, void *ctx, so101_real s, so101_real goal[SO101_NJ]) {
+static void joints_path(so101_arm *a, void *ctx, so101_real s, so101_real want[SO101_NJ]) {
     const joints_t *J = ctx;
-    for (int j = 0; j < SO101_NJ; j++) goal[j] = J->from[j] + s * (J->to[j] - J->from[j]);
+    for (int j = 0; j < SO101_NJ; j++) want[j] = J->from[j] + s * (J->to[j] - J->from[j]);
 }
 
 int so101_arm_move_joints(so101_arm *a, const so101_real target[SO101_NJ], so101_real speed, int check) {
@@ -381,8 +526,10 @@ int so101_arm_move_joints(so101_arm *a, const so101_real target[SO101_NJ], so101
             k += snprintf(line + k, sizeof line - k, " %s %+.1f>%+.1f", SHORT[j], (double)J.from[j], (double)J.to[j]);
     }
     say(a, "--- %s:%s", a->step, k ? line : " nothing to move");
-    double duration = (double)(1.875 * dist / speed);
-    return follow(a, joints_path, &J, duration > 0.3 ? duration : 0.3, 0.3);
+    motion m = {joints_path, &J, (double)(1.875 * dist / speed), {0}};
+    if (m.duration < 0.3) m.duration = 0.3;
+    so101_follow_init(&m.o);
+    return run(a, &m);
 }
 
 int so101_arm_move_to(so101_arm *a, const so101_real xyz[3], const so101_real *pitch, so101_real speed) {
@@ -405,37 +552,73 @@ int so101_arm_move_to(so101_arm *a, const so101_real xyz[3], const so101_real *p
     return rc;
 }
 
-/* ---- straight lines -------------------------------------------------------------------------- */
+/* ---- chains of poses ------------------------------------------------------------------------- */
 
-typedef struct { int n; so101_real (*q)[SO101_NJ]; so101_real (*tip)[3]; } through_t;
-static so101_real LINE_Q[MAXLINE + 1][SO101_NJ], LINE_TIP[MAXLINE + 1][3];
+typedef struct { int n; const so101_real (*q)[SO101_NJ]; } chain_t;
 
-static void through_path(so101_arm *a, void *ctx, so101_real s, so101_real goal[SO101_NJ]) {
-    const through_t *T = ctx;
-    int i = (int)(s * T->n);
-    if (i > T->n - 1) i = T->n - 1;
-    so101_real f = s * T->n - i;
-    for (int j = 0; j < SO101_NJ; j++) goal[j] = T->q[i][j] + f * (T->q[i + 1][j] - T->q[i][j]);
-    for (int k = 0; k < 3; k++) a->target[k] = T->tip[i][k] + f * (T->tip[i + 1][k] - T->tip[i][k]);
+static void chain_path(so101_arm *a, void *ctx, so101_real s, so101_real want[SO101_NJ]) {
+    const chain_t *c = ctx;
+    int segs = c->n - 1, i = (int)(s * segs);
+    if (i > segs - 1) i = segs - 1;
+    so101_real f = s * segs - i;
+    for (int j = 0; j < SO101_NJ; j++) want[j] = c->q[i][j] + f * (c->q[i + 1][j] - c->q[i][j]);
+    so101_tip(&a->model, want, a->target, NULL);
     a->have_target = 1;
 }
 
-/* Follow poses 0..n, linearly between them, on one minimum-jerk profile over duration. */
-static int through(so101_arm *a, int n, double duration, const so101_pose *last) {
-    so101_real jump = 0;
-    for (int i = 0; i < n; i++)
+int so101_arm_follow(so101_arm *a, const so101_real (*q)[SO101_NJ], int n, const so101_follow *o) {
+    if (!a->torque) return fail(a, SO101_ESTATE, "the torque is off");
+    if (n < 2) return fail(a, SO101_EPATH, "%s: a chain needs two poses or more", a->step);
+    so101_real from = 0, jump = 0, length = 0, tip[3], prev[3];
+    for (int j = 0; j < 4; j++)
+        if (RFABS(q[0][j] - a->goal[j]) > from) from = RFABS(q[0][j] - a->goal[j]);
+    if (from > a->start_max)
+        return fail(a, SO101_EPATH, "%s: the chain starts %.1f degrees from the goals", a->step, (double)from);
+    for (int i = 0; i < n; i++) {
         for (int j = 0; j < 4; j++) {
-            so101_real d = RFABS(LINE_Q[i + 1][j] - LINE_Q[i][j]);
-            if (d > jump) jump = d;
+            if (q[i][j] < a->model.lo[j] - 1 || q[i][j] > a->model.hi[j] + 1)
+                return fail(a, SO101_EPATH, "%s: pose %d puts %s at %.1f, outside %.1f..%.1f", a->step, i, SHORT[j],
+                            (double)q[i][j], (double)a->model.lo[j], (double)a->model.hi[j]);
+            if (i && RFABS(q[i][j] - q[i - 1][j]) > jump) jump = RFABS(q[i][j] - q[i - 1][j]);
         }
+        so101_tip(&a->model, q[i], tip, NULL);
+        if (i) length += RSQRT((tip[0] - prev[0]) * (tip[0] - prev[0]) + (tip[1] - prev[1]) * (tip[1] - prev[1])
+                               + (tip[2] - prev[2]) * (tip[2] - prev[2]));
+        memcpy(prev, tip, sizeof tip);
+    }
     if (jump > 3) return fail(a, SO101_EPATH, "%s: the poses jump %.1f degrees between neighbours", a->step, (double)jump);
-    say(a, "--- %s: %d poses, pitch %+.1f > %+.1f, cost %.3f > %.3f", a->step, n, (double)a->pose.pitch,
-        (double)last->pitch, (double)a->pose.cost, (double)last->cost);
-    through_t T = {n, LINE_Q, LINE_TIP};
-    int rc = follow(a, through_path, &T, duration > 0.3 ? duration : 0.3, 0.3);
-    if (rc == SO101_OK) a->pose = *last;
-    else a->have_pose = 0;
-    return rc;
+    motion m = {chain_path, NULL, 0, *o};
+    m.duration = o->duration > 0 ? o->duration : o->speed > 0 ? (o->steady ? 1 : 1.875) * length / o->speed : 0;
+    if (!o->steady && m.duration < 0.3) m.duration = 0.3;
+    if (m.duration < a->tick_us / 1e6) m.duration = a->tick_us / 1e6;
+    so101_pose first, last;
+    so101_pose_eval(&a->model, q[0], &first);
+    so101_pose_eval(&a->model, q[n - 1], &last);
+    say(a, "--- %s: %d poses, pitch %+.1f > %+.1f, cost %.3f > %.3f", a->step, n - 1, (double)first.pitch, (double)last.pitch,
+        (double)first.cost, (double)last.cost);
+    chain_t c = {n, q};
+    m.ctx = &c;
+    int rc = run(a, &m);
+    if (rc) {
+        a->have_pose = 0;
+        return rc;
+    }
+    if (o->press > 0) so101_pose_eval(&a->model, a->goal, &a->pose);
+    else a->pose = last;
+    a->have_pose = 1;
+    return SO101_OK;
+}
+
+/* ---- straight lines -------------------------------------------------------------------------- */
+
+static so101_real LINE_Q[MAXLINE + 1][SO101_NJ];
+
+/* LINE_Q[0..n] followed over duration s, the hold after it as so101_arm_follow's. */
+static int through(so101_arm *a, int n, double duration) {
+    so101_follow o;
+    so101_follow_init(&o);
+    o.duration = (so101_real)duration;
+    return so101_arm_follow(a, (const so101_real (*)[SO101_NJ])LINE_Q, n + 1, &o);
 }
 
 int so101_arm_line_to(so101_arm *a, const so101_real xyz[3], so101_real speed) {
@@ -449,7 +632,6 @@ int so101_arm_line_to(so101_arm *a, const so101_real xyz[3], so101_real speed) {
     if (n > MAXLINE) return fail(a, SO101_EPATH, "a line of %.0f cm is longer than %d poses", (double)(100 * len), MAXLINE);
     so101_pose p = a->pose;
     memcpy(LINE_Q[0], p.deg, sizeof LINE_Q[0]);
-    memcpy(LINE_TIP[0], p.tip, sizeof LINE_TIP[0]);
     for (int k = 1; k <= n; k++) {
         so101_real c[3] = {s[0] + d[0] * k / n, s[1] + d[1] * k / n, s[2] + d[2] * k / n};
         so101_pose q;
@@ -458,17 +640,59 @@ int so101_arm_line_to(so101_arm *a, const so101_real xyz[3], so101_real speed) {
                         (double)(100 * c[1]), (double)(100 * c[2]));
         p = q;
         memcpy(LINE_Q[k], p.deg, sizeof LINE_Q[k]);
-        memcpy(LINE_TIP[k], p.tip, sizeof LINE_TIP[k]);
     }
     snprintf(a->step, sizeof a->step, "line to %.1f %.1f %.1f", (double)(100 * xyz[0]), (double)(100 * xyz[1]),
              (double)(100 * xyz[2]));
-    return through(a, n, (double)(1.875 * len / speed), &p);
+    return through(a, n, (double)(1.875 * len / speed));
 }
 
 int so101_arm_move_by(so101_arm *a, const so101_real dxyz[3], so101_real speed) {
     if (!a->have_pose) return fail(a, SO101_ESTATE, "a move by goes on from a move_to");
     so101_real to[3] = {a->pose.tip[0] + dxyz[0], a->pose.tip[1] + dxyz[1], a->pose.tip[2] + dxyz[2]};
     return so101_arm_line_to(a, to, speed);
+}
+
+/* ---- the gripper ----------------------------------------------------------------------------- */
+
+#define STILL 0.25             /* s the jaw stands ... */
+#define STILL_PCT 0.5          /* ... within this much (percent) for a grasp to count it stopped */
+
+int so101_arm_grasp(so101_arm *a, so101_real rate, so101_real past, so101_real squeeze, so101_real empty, so101_real *at) {
+    if (!a->torque) return fail(a, SO101_ESTATE, "the torque is off");
+    ticks k;
+    ticks_start(a, &k);
+    k.free_load = SO101_GRIP;      /* pressing on what it holds is the point; its Torque_Limit caps it */
+    so101_real g = a->goal[SO101_GRIP];
+    double last = 0;
+    say(a, "--- %s: closing from %.1f percent at %.0f percent/s", a->step, (double)g, (double)rate);
+    for (;;) {
+        double t = ticks_now(a, &k);
+        if (stop_asked(a)) return freeze(a, SO101_ESTOP, "stop asked for");
+        g -= rate * (so101_real)(t - last);
+        if (g < 0) g = 0;
+        last = t;
+        a->goal[SO101_GRIP] = g;
+        int rc = tick(a, &k, t);
+        if (rc) return rc;
+        so101_real p = k.pos[SO101_GRIP];
+        int still = t - k.th[k.h0] >= STILL && RFABS(k.ph[k.h0][SO101_GRIP] - p) < (so101_real)STILL_PCT;
+        if (still && (g < p - past || g <= 0)) break;
+        tick_wait(a, &k);
+    }
+    *at = k.pos[SO101_GRIP];
+    if (*at < empty) {
+        a->goal[SO101_GRIP] = *at > 0 ? *at : 0;
+        say(a, "    the jaws closed to %.1f percent on nothing", (double)*at);
+        tick_wait(a, &k);
+        return hold(a, &k, 0);
+    }
+    a->goal[SO101_GRIP] = *at - squeeze;
+    tick_wait(a, &k);
+    int rc = hold(a, &k, 0.4);
+    if (rc) return rc;
+    say(a, "    holding at %.1f percent (stopped at %.1f), load %+.0f %%, %.0f mA", (double)k.pos[SO101_GRIP], (double)*at,
+        (double)k.load[SO101_GRIP], (double)k.ma[SO101_GRIP]);
+    return SO101_OK;
 }
 
 /* ---- the start pose -------------------------------------------------------------------------- */
@@ -486,14 +710,14 @@ int so101_arm_unfold(so101_arm *a) {
     return so101_arm_move_joints(a, ready, 40, 1);
 }
 
-/* The tip straight up to height z, without the table checks: each 1 mm step the least change of lift,
- * elbow and wrist flex that raises it (damped least squares on their Jacobian). */
-static int rise(so101_arm *a, so101_real z, so101_real speed) {
+/* The tip straight up: each 1 mm step the least change of lift, elbow and wrist flex that raises it (damped
+ * least squares on their Jacobian). */
+int so101_arm_rise(so101_arm *a, so101_real z, so101_real speed) {
+    if (!a->torque) return fail(a, SO101_ESTATE, "the torque is off");
     so101_real deg[SO101_NJ], start[3], tip[3];
     memcpy(deg, a->goal, sizeof deg);
     so101_tip(&a->model, deg, start, NULL);
     memcpy(LINE_Q[0], deg, sizeof LINE_Q[0]);
-    memcpy(LINE_TIP[0], start, sizeof LINE_TIP[0]);
     int n = 0, edge = 0;
     memcpy(tip, start, sizeof tip);
     while (tip[2] < z && n < MAXLINE) {
@@ -529,14 +753,10 @@ static int rise(so101_arm *a, so101_real z, so101_real speed) {
         so101_tip(&a->model, deg, tip, NULL);
         n++;
         memcpy(LINE_Q[n], deg, sizeof LINE_Q[n]);
-        memcpy(LINE_TIP[n], tip, sizeof LINE_TIP[n]);
     }
     if (n > 0) {
         snprintf(a->step, sizeof a->step, "up to %.0f cm above the table", (double)(100 * (tip[2] - TABLE)));
-        so101_pose last;
-        so101_pose_eval(&a->model, LINE_Q[n], &last);
-        a->pose = last;
-        int rc = through(a, n, (double)(1.875 * (tip[2] - start[2]) / speed), &last);
+        int rc = through(a, n, (double)(1.875 * (tip[2] - start[2]) / speed));
         if (rc) return rc;
     }
     if (edge) return fail(a, SO101_EPATH, "rising, a joint reached its range end at %.1f cm", (double)(100 * (tip[2] - TABLE)));
@@ -549,7 +769,7 @@ int so101_arm_home(so101_arm *a) {
     so101_real tip[3];
     so101_tip(&a->model, a->goal, tip, NULL);
     int rc;
-    if (tip[2] < TABLE + (so101_real)0.05 && (rc = rise(a, TABLE + (so101_real)0.06, (so101_real)0.01))) return rc;
+    if (tip[2] < TABLE + (so101_real)0.05 && (rc = so101_arm_rise(a, TABLE + (so101_real)0.06, (so101_real)0.01))) return rc;
     char why[160];
     so101_real ready[SO101_NJ];
     ready_pose(a, ready);

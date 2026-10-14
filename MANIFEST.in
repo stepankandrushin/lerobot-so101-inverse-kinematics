@@ -1,4 +1,4 @@
 # The sdist carries the C library whole: its headers (setuptools takes only the .c files it compiles),
 # the Makefile, the C test and the examples.
 include include/*.h src/*.h Makefile
-include test/*.c examples/*.c examples/*.py
+include test/*.c examples/*.c examples/*.py examples/figures/*.py

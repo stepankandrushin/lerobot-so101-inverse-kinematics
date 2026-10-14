@@ -18,6 +18,7 @@ make test                               # the C library alone, in double, float 
 make example                            # examples/ik.c, the kinematics from C
 uv run examples/kinematics.py           # the Python binding, no arm
 uv run examples/triangle.py             # moves the arm: README.md, Safety
+uv run examples/figures/heart.py --dry  # a fast run planned and printed, no arm; without --dry it drives the arm
 uv run tools/run_stats.py outputs/so101ik/NAME.csv    # how closely a run's tip followed its lines
 uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-tinyxml2<11' \
     tools/bench.py --lerobot CLONE [--lerobot061 FILE] [--urdf FILE]   # against LeRobot's solver
@@ -31,14 +32,18 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
 ## Layout
 
 - include/so101ik.h: the whole C API. src/: kin.c (forward kinematics, torques, rules, collision
-  check), ik.c (the IK and the local solver), sts.c and sts.h (the servos' packets), arm.c (the moves),
-  hal_posix.c (the serial port on macOS and Linux), model.c (generated), so101ik_internal.h (what the
-  sources share).
+  check), ik.c (the IK and the local solver), path.c (fast runs planned: poses along a path, the
+  timing, the ticks, the fastest pitch, learning, the way out of the rest pose), sts.c and sts.h (the
+  servos' packets), arm.c (the moves), fast.c (fast runs driven), hal_posix.c (the serial port on
+  macOS and Linux), model.c (generated), so101ik_internal.h (what the sources share).
 - python/so101ik/: __init__.py (Arm, Model, RobotKinematics, the port and calibration search),
-  _core.c and _arm.c (the CPython binding, numpy's C API for LeRobot's arrays). setup.py builds them
+  fast.py (fast runs: Run, closed_run, join, check, and what Arm.run and the way home call),
+  figures.py (a figure's coordinates into a plane, the examples' command line, the dance), _core.c,
+  _arm.c and _path.c (the CPython binding; _path.c is path.c on numpy arrays). setup.py builds them
   with src/.
 - tools/: gen_model.py (src/model.c from the URDF and its meshes), bench.py, run_stats.py.
-  test/test.c is make test. examples/: triangle.py (the arm), kinematics.py and ik.c (no arm).
+  test/test.c is make test. examples/: triangle.py (the arm), kinematics.py and ik.c (no arm),
+  figures/ (one script a figure, show.py, dance.py).
 - media/: the README's pictures. .github/workflows/test.yml: make test, make example, the Python
   binding and `uv build` on Linux and macOS.
 
@@ -64,6 +69,18 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
 - On macOS a process can run on an efficiency core, and a timing then differs by up to 3 times from
   one run to the next: compare speeds in one process with the calls interleaved, as bench.py does.
 - One program on a servo bus at a time: LeRobot's and this driver's packets collide.
+- A fast run's limits (so101_fast_init: 220 degrees/s, 1500 degrees/s^2, a lag of 60 ms behind 22)
+  were measured on one 12 V follower at Torque_Limit 1000 and Acceleration 0 (agents/measurements.md).
+  A change to them, to the stop rules or to so101_unfold_path is a change to what the arm does at
+  full torque: try it at `--speed 0.5` first.
+- A fast run leaves the servos at Torque_Limit 1000 and Acceleration 0 until so101_arm_fast(.., 0);
+  Arm puts them back before any other move, after a stop and on the way home, and torque_on writes
+  500 and 254 where a killed run left them.
+- The fast way out of the rest pose and back is only taken where the model clears it with joints 6
+  degrees off (so101_unfold_clear). With zero offsets the folded gripper lies on the table in the
+  model, so it is refused there and the arm unfolds the slow way: that is by design, not a bug.
+- No script in examples/figures/ may have a standard-library module's name (wave.py would replace
+  the module `wave` in the process): the waves are waves.py.
 
 ## Docs
 

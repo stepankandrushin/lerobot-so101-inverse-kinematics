@@ -120,3 +120,58 @@ joints were moved to, their stops, so the fold follows each arm's own calibratio
   the move), log and the CSV.
 - The joint path check uses no gap: two parts' surface points never come closer than 0, so it
   catches the table only.
+
+## Fast runs (src/path.c, src/fast.c, python/so101ik/fast.py)
+
+A closed path of the tip is planned whole before the arm moves; the arm then only replays numbers. The
+limits and the servo's response are measurements (measurements.md, Fast runs), not the servos' data.
+
+- **Poses along the path** (so101_path_poses): points 2 mm apart, each pose from the one before:
+  so101_ik_pitch at a pitch given for each point, the elbow branch of the pose before first, or
+  so101_ik_near for the least-loaded poses. Every pose allowed by the rules, the meshes `gap` (2 cm)
+  apart every 5th point, no joint more than 3 degrees from its neighbour. A closed path must come back
+  to its first pose (in the least-loaded poses a second lap starts from where the first ended, since
+  the least-loaded pose at the first point need not be the one a path returns to).
+- **The fastest pitch** (so101_path_fastest): the pitch is the same smooth function of the place along
+  the lap on every lap, a mean and three harmonics. The best constant pitch from -75 to 75 degrees in
+  steps of 15 starts it; then each coefficient in turn, up and down by 16 degrees, halving the step to 2
+  when nothing gains, both elbow branches each time; the cost is the lap timed between two others.
+  20-60 ms a figure on an M1. The gripper then nods with the figure: the wrist
+  takes part of the tip's way, the shoulder, the slowest to swing, less. A local best, not a global one.
+- **Timing** (so101_path_time): time-optimal path parameterisation on the grid of points. With x the
+  squared path speed at a point, a joint's speed is its step times the root of x; its acceleration is
+  the change of its step times x (the path bends) plus its step times half the change of x along the
+  segment. Each point gets the largest x the speed limit and the bend at the acceleration limit allow,
+  then a backward pass lowers x to what can still brake for what follows and a forward pass to what can
+  be reached. The two parts of the acceleration are added by size, so the result is on the safe side of
+  the exact optimum (TOPP-RA). A joint's straight move comes out as the trapezoid it should be (90
+  degrees in d/v + v/a = 0.5558 s; make test checks it). A closed path gone round several laps is
+  indexed modulo the lap, without copies.
+- **Ticks** (so101_path_sample): the place along the path as a function of time, smoothed with a Hann
+  window over 40 ms (the joints stay on the path; only the timing is smoothed, so no acceleration
+  starts at once), sampled every dt (10 ms). The run starts and ends half a window early and late, so it
+  starts and ends exactly at rest on its ends.
+- **Driving** (so101_arm_play): at Torque_Limit 1000 and Acceleration 0 (so101_arm_fast) a joint
+  follows a goal streamed at 100 Hz as a first-order lag of 60 ms behind a dead time of 22 ms. So the
+  goal sent at time t is where the joint should be at t + dead plus lag times its speed there, plus the
+  sag compensation of the slow moves (3.7 degrees per N m) and a learned correction, inside the ranges.
+  The goal is worked out from the time each tick really starts, so a late tick sends its own time's
+  goal. One sync read of position, load and current a tick; a joint err_max (12) degrees from where it
+  should be for 0.15 s, any arm joint at 99 % load for 0.4 s, or hal.stop() freezes every goal where its
+  joint stands.
+- **Learning** (so101_path_learn): after a replay, each arm joint's error at each tick (where it should
+  have been less where it was), smoothed by a Gaussian of 25 ms both ways in time so nothing shifts,
+  through the inverse of the joint's response (the error dead later plus lag times its rate), 0.7 of
+  it added to the corrections.
+- **From the rest pose and back** (so101_unfold_path, so101_unfold_clear): one joint path, half a degree
+  a point, timed like a run. Wrist flex, elbow, roll and gripper go evenly; lift and pan wait for the
+  first quarter and catch up on a smooth step, because in the rest pose the gripper hangs just above
+  the table, and the lift ten degrees forward with the wrist still down puts it there. The way is
+  checked at 25 poses, each also with lift, elbow and wrist flex 6 degrees (tube) ahead or behind in all
+  eight combinations, clipped to the way's ends, for any contact (gap 0); the replay stops at 6 degrees
+  off. Backwards it is the way home.
+- **In Python** (fast.py): closed_run plans and samples, join chains runs with straight joint moves
+  between them, Arm.run (drive) takes the fast way out of the rest pose when the arm still stands
+  there and the way is clear (else the slow unfold and a move at 60 degrees/s), replays with learning,
+  and leaves the servos at the run's settings; Arm's way home folds at the run's pace (fold_home) when
+  the arm still stands where the run ended, else puts the settings back and goes home the slow way.

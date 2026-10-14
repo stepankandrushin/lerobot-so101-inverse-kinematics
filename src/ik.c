@@ -629,6 +629,14 @@ int so101_ik_pitch(so101_model *m, const so101_real xyz[3], so101_real pitch, so
     return SO101_EUNREACHABLE;
 }
 
+int so101_ik_branch(so101_model *m, const so101_real xyz[3], so101_real pitch, so101_real roll, so101_real grip, int sigma,
+                    so101_pose *out) {
+    planar_prepare(m, roll, grip);
+    target_t tg;
+    target(m, xyz, &tg);
+    return full_pose(m, &tg, pitch, sigma, roll, grip, out) && allowed(m, out) ? SO101_OK : SO101_EUNREACHABLE;
+}
+
 /* ---- a tip frame from the joints the arm has (LeRobot's RobotKinematics.inverse_kinematics) ---- */
 
 static void log3(const so101_real M[9], so101_real w[3]) {

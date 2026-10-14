@@ -80,6 +80,35 @@ void so101_frames(const so101_model *m, const so101_real deg[SO101_NJ], so101_tf
     so101_frames_rad(q, F);
 }
 
+const char *so101_link_name(int link) {
+    static const char *names[SO101_NL + 1] = {"base_link", "shoulder_link", "upper_arm_link", "lower_arm_link", "wrist_link",
+                                              "gripper_link", "moving_jaw_so101_v1_link", "gripper_frame_link"};
+    return link >= 0 && link <= SO101_NL ? names[link] : "";
+}
+
+void so101_link_frames(const so101_model *m, const so101_real deg[SO101_NJ], so101_real T[SO101_NL + 1][16]) {
+    so101_tf F[8];
+    so101_frames(m, deg, F);
+    for (int k = 0; k <= SO101_NL; k++) {
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) T[k][4 * r + c] = F[k].R[3 * r + c];
+            T[k][4 * r + 3] = F[k].p[r];
+        }
+        T[k][12] = T[k][13] = T[k][14] = 0;
+        T[k][15] = 1;
+    }
+}
+
+int so101_link_points(int link, const float (**pts)[3]) {
+    if (link < 0 || link >= SO101_NL) {
+        *pts = NULL;
+        return 0;
+    }
+    const so101_node *root = &SO101_NODES[SO101_LINK_ROOT[link]];   /* a link's tree holds its points in one run */
+    *pts = &SO101_MESH_PTS[root->first];
+    return root->n;
+}
+
 static so101_real tip_pitch(const so101_tf F[8]) {
     const so101_real *T = F[7].R, *W = F[4].R;
     so101_real dx = T[2], dy = T[5], dz = T[8], nx = W[2], ny = W[5];

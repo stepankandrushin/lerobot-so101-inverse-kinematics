@@ -22,11 +22,16 @@ point cache left out with -DSO101_SMALL (`make test` runs both and checks them a
   precision about the same). An ESP32-S3 is perhaps 20 to 40 times slower on such code, so about
   0.5-1.5 ms for so101_ik and 0.2-0.4 ms for so101_ik_near: well inside a 20 ms tick. To be measured with
   test/test.c, which needs only printf and a clock.
+- A fast run (agents/design.md, Fast runs): its ticks are 6 floats every 10 ms (the 5.5 s of a 30 cm
+  heart's three laps, 13 KB), its path 2 mm points of 3 floats with their 6 joints (480 points, 17 KB)
+  and so101_path_fastest's work 10 floats a point (19 KB): PSRAM if the SRAM is short. The pitch search
+  takes 20-60 ms on an M1, so perhaps 1-2 s on an S3, once before the run; the replay itself is one
+  sync write and one sync read a tick, 100 Hz.
 
 ## The port
 
 1. A component: `components/so101/CMakeLists.txt` with `idf_component_register(SRCS src/kin.c src/ik.c
-   src/model.c src/sts.c src/arm.c INCLUDE_DIRS include PRIV_INCLUDE_DIRS src)` and the definitions
+   src/path.c src/model.c src/sts.c src/arm.c src/fast.c INCLUDE_DIRS include PRIV_INCLUDE_DIRS src)` and the definitions
    SO101_FLOAT, SO101_SMALL and SO101_NO_POSIX (src/hal_posix.c compiles to nothing then), plus
    `-fsingle-precision-constant` so double literals do not pull in double arithmetic.
 2. so101_hal on the ESP32: write `uart_write_bytes`, read `uart_read_bytes` with the timeout in ticks,

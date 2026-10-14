@@ -45,10 +45,6 @@ extern float so101_world_pts[][3];
 extern unsigned so101_leaf_stamp[];
 #endif
 
-/* The pan axis in the base frame, for the rule that keeps the roll axis and tip out of the base. */
-#define SO101_PAN_AXIS_X ((so101_real)0.0388353)
-#define SO101_PAN_AXIS_Y ((so101_real)0.0)
-
 /* F[0] the base (identity), F[1..6] shoulder to moving jaw, F[7] the tip; angles in URDF radians. */
 void so101_frames_rad(const so101_real q[SO101_NJ], so101_tf F[8]);
 /* The same from calibrated degrees and the model's offsets. */
@@ -56,6 +52,10 @@ void so101_frames(const so101_model *m, const so101_real deg[SO101_NJ], so101_tf
 void so101_pose_from_frames(const so101_model *m, const so101_real deg[SO101_NJ], const so101_tf F[8], so101_pose *out);
 so101_real so101_score(const so101_model *m, const so101_pose *p);
 int so101_collides_frames(const so101_model *m, const so101_tf F[8], so101_real gap);
+/* The pose at a pitch on elbow branch sigma (+1 or -1) alone, if it is allowed (src/ik.c; src/path.c starts a
+ * path on each branch). */
+int so101_ik_branch(so101_model *m, const so101_real xyz[3], so101_real pitch, so101_real roll, so101_real grip, int sigma,
+                    so101_pose *out);
 
 /* atan2 as Cephes computes it (atan.c: a rational function after range reduction, 1e-16 relative),
  * a few times faster than the system's on the inner loops of the IK. */

@@ -100,6 +100,17 @@ void so101_model_stock(so101_model *m);   /* LeRobot's view: no offsets, the URD
 
 void so101_pose_eval(const so101_model *m, const so101_real deg[SO101_NJ], so101_pose *out);
 void so101_tip(const so101_model *m, const so101_real deg[SO101_NJ], so101_real tip[3], so101_real *pitch);
+
+/* The links in chain order, then the tip frame: base_link, shoulder_link, upper_arm_link, lower_arm_link,
+ * wrist_link, gripper_link, moving_jaw_so101_v1_link (the URDF's names), gripper_frame_link. */
+const char *so101_link_name(int link);
+/* Each link's frame and the tip frame in the base frame, row-major 4x4, for calibrated degrees. */
+void so101_link_frames(const so101_model *m, const so101_real deg[SO101_NJ], so101_real T[SO101_NL + 1][16]);
+/* The surface points of a link's mesh, in the link's own frame, about 4 mm apart; returns how many. */
+int so101_link_points(int link, const float (**pts)[3]);
+/* Where the vertical pan axis stands in the base frame, m. */
+#define SO101_PAN_AXIS_X ((so101_real)0.0388353)
+#define SO101_PAN_AXIS_Y ((so101_real)0.0)
 /* The tip frame (row-major 4x4) for URDF angles in degrees, pan to roll: LeRobot's forward_kinematics. */
 void so101_fk_urdf(const so101_real q_deg[SO101_NA], so101_real T[16]);
 
@@ -134,6 +145,60 @@ int so101_ik_near(so101_model *m, const so101_real xyz[3], const so101_pose *pre
  * the pose of fallback (so101_model_stock's, say) at the arm's present pitch is taken, if it has one. */
 int so101_ik_local(so101_real q[SO101_NA], const so101_real T[16], so101_real wp, so101_real wo, int iters,
                 so101_model *fallback, so101_real *err);
+
+/* ---- fast runs: a path planned whole, then replayed as fast as the servos go (src/path.c) ------ */
+
+typedef struct {
+    so101_real vmax;          /* degrees/s a joint is planned for (220) */
+    so101_real amax;          /* degrees/s^2 (1500) */
+    so101_real top;           /* degrees/s no run may ask of a joint, the servos' own top speed (295) */
+    so101_real dt;            /* s between goals (0.01) */
+    so101_real lag, dead;     /* s: a servo follows a streamed goal as a lag behind a dead time (0.060, 0.022) */
+    so101_real smooth;        /* s over which the speed along the path is smoothed (0.04) */
+    so101_real gap;           /* m between parts, and to the table, along a run (0.02) */
+    so101_real err_max;       /* degrees from where a joint should be, for 0.15 s: the run stops (12) */
+    so101_real tube;          /* the same on the way from the start pose and back (6) */
+    int torque_limit, acceleration;   /* the arm servos' RAM settings during a run (1000, 0) */
+} so101_fast;
+void so101_fast_init(so101_fast *f);
+
+/* The joints along tip points xyz[0..n-1] (m, a few mm apart), each pose solved from the one before:
+ * at pitch[i] degrees, starting on elbow branch +1 (branch >= 0) or -1, or with pitch NULL in the
+ * least-loaded pose near the one before. Every pose allowed, the parts gap apart (every 5th point), no
+ * joint more than 3 degrees from the pose before. A closed path (its last point its first) must come
+ * back to its first pose, which q[n-1] then is. SO101_OK, or the error with *at the point it failed at. */
+int so101_path_poses(so101_model *m, const so101_real (*xyz)[3], int n, const so101_real *pitch, so101_real roll,
+                     so101_real grip, int branch, so101_real gap, so101_real (*q)[SO101_NJ], int *at);
+/* The fastest timing of the joint path q[0..n-1] gone round laps times (laps > 1 for a closed path),
+ * starting and ending at rest, each arm joint under vmax and amax: t[i] (s) at which it passes point i,
+ * (n - 1) laps + 1 of them. Returns the time of the whole. */
+so101_real so101_path_time(const so101_real (*q)[SO101_NJ], int n, int laps, const so101_fast *f, so101_real *t);
+/* That run every f->dt, slowed to speed (1: the limits), its speed along the path smoothed over f->smooth:
+ * out[k] the joints at tick k, at[k] (may be NULL) the place along the path as a point index and a
+ * fraction. Returns the number of ticks, or -1 if more than cap. */
+int so101_path_sample(const so101_real (*q)[SO101_NJ], int n, int laps, const so101_real *t, so101_real speed,
+                      const so101_fast *f, so101_real (*out)[SO101_NJ], so101_real *at, int cap);
+/* The pitch along a closed path that makes its lap shortest: the best constant pitch, then a mean and three
+ * harmonics of the place along the lap, one coefficient at a time in steps of 16 degrees down to 2. pitch[n]
+ * gets it, q[n] its joints, *lap the time of a lap between two others; work: SO101_FASTEST_WORK(n) reals. */
+#define SO101_FASTEST_WORK(n) (10 * (n) + 4)
+int so101_path_fastest(so101_model *m, const so101_real (*xyz)[3], int n, so101_real roll, so101_real grip,
+                       const so101_fast *f, so101_real *pitch, so101_real (*q)[SO101_NJ], so101_real *lap, so101_real *work);
+/* A sampled run against the model as it will be driven: each arm joint 2 degrees inside its range and under
+ * f->top, the parts f->gap apart and from the table (every 5th tick). 0 if it passes, else 1 and why. */
+int so101_run_check(const so101_model *m, const so101_real (*q)[SO101_NJ], int n, const so101_fast *f, char *why,
+                    int nwhy);
+/* Iterative learning: after a replay that read pos, fix[k] += gain times what each arm joint was off at tick
+ * k, smoothed over 25 ms both ways in time and put through the inverse of how a servo follows a goal. */
+void so101_path_learn(const so101_real (*q)[SO101_NJ], const so101_real (*pos)[SO101_NJ], int n, const so101_fast *f,
+                      so101_real gain, so101_real (*fix)[SO101_NA]);
+/* The way from the folded pose a to the pose b, half a degree a point: wrist flex, elbow, roll and gripper
+ * evenly, lift and pan from a quarter of the way on, so the gripper comes up off the table before the upper
+ * arm comes forward. Backwards it folds. Returns the points, or -1 if more than cap. */
+int so101_unfold_path(const so101_real a[SO101_NJ], const so101_real b[SO101_NJ], so101_real (*q)[SO101_NJ], int cap);
+/* 1 if nothing touches along that way (the meshes, the table), also with lift, elbow and wrist flex each
+ * tube degrees ahead or behind, in all eight combinations; else 0. */
+int so101_unfold_clear(const so101_model *m, const so101_real a[SO101_NJ], const so101_real b[SO101_NJ], so101_real tube);
 
 /* ---- the arm --------------------------------------------------------------------------------- */
 
@@ -176,7 +241,37 @@ typedef struct {
     so101_real load_max;         /* % of the servo's torque for 0.3 s: overloaded (45) */
     so101_real sag;              /* degrees per N m of holding torque the goals lead by (3.7; 0 for none) */
     int acceleration, torque_limit;   /* RAM settings written at torque-on (254, 500) */
+    /* The lead (so101_follow.lead): a servo stands still until its goal is 1-1.5 degrees away (gearbox
+     * friction, P control), so each of pan, lift, elbow and wrist flex trails its goal along a chain. The
+     * goal is led ahead by what the joint lags: lead_rate of the lag per second, at most lead_max degrees,
+     * a lag under lead_min left alone. */
+    so101_real lead[4];          /* degrees, pan to wrist flex: kept from one chain to the next; 0 at torque-on */
+    so101_real lead_rate;        /* per second (5) */
+    so101_real lead_max;         /* degrees (1.6) */
+    so101_real lead_min;         /* degrees (0.1) */
+    so101_real start_max;        /* degrees a chain's first pose may lie from the goals, pan to wrist flex (5) */
+    int contact;                 /* the last so101_arm_follow with a press stopped on contact */
 } so101_arm;
+
+/* How so101_arm_follow goes along a chain of poses. so101_follow_init sets the defaults in brackets. */
+typedef struct {
+    so101_real speed;            /* the tip's peak speed, m/s, which sets the duration from the chain's length (0.03) */
+    so101_real duration;         /* s for the whole chain instead, if over 0 (0) */
+    int steady;                  /* the goals at a steady pace, not on one minimum-jerk profile (0) */
+    so101_real settle;           /* s the goals hold the last pose (0.3) */
+    so101_real within;           /* over 0: the hold ends as soon as pan, lift, elbow and wrist flex stand this
+                                    close to the last pose, degrees (0) */
+    int lead;                    /* the goals led by what the joints lag (so101_arm.lead) (0) */
+    /* Lowering until contact: with press over 0 the move stops once the tip, from the servos' positions, stands
+     * press m higher above the goals' tip than it did while it moved freely (the median over free_from to
+     * free_to of the duration) for press_ticks ticks running. It ends there or at the chain's end with every
+     * goal where its joint stands (the gripper's as it was), the lead dropped, held for settle; contact says
+     * which. */
+    so101_real press;            /* m (0) */
+    so101_real free_from, free_to;   /* fractions of the duration (0.15, 0.5) */
+    int press_ticks;             /* (3) */
+} so101_follow;
+void so101_follow_init(so101_follow *o);
 
 
 void so101_arm_init(so101_arm *a, const so101_hal *hal, const so101_servo_cal cal[SO101_NJ]);
@@ -188,12 +283,62 @@ int so101_arm_move_joints(so101_arm *a, const so101_real target[SO101_NJ], so101
 int so101_arm_move_to(so101_arm *a, const so101_real xyz[3], const so101_real *pitch, so101_real speed);   /* deg/s */
 int so101_arm_line_to(so101_arm *a, const so101_real xyz[3], so101_real speed);                            /* m/s */
 int so101_arm_move_by(so101_arm *a, const so101_real dxyz[3], so101_real speed);                           /* m/s */
+/* Through n poses (calibrated degrees, all six joints), linearly between them, as o says. The first must be
+ * within start_max degrees of the goals, neighbours within 3 of each other (pan to wrist flex), every pose inside
+ * the ranges by a degree; nothing else is checked: the caller planned the chain. */
+int so101_arm_follow(so101_arm *a, const so101_real (*q)[SO101_NJ], int n, const so101_follow *o);
+/* Close the gripper at rate percent/s until the jaw has stood still for 0.25 s with its goal past percent
+ * beyond it, or the goal is at 0; *at is where it stopped. Short of empty it holds nothing and the goal stays
+ * there; else the goal goes squeeze past it and holds 0.4 s. The overload rule leaves the gripper alone here
+ * (its Torque_Limit caps what it presses with); the stall rule never takes the gripper. */
+int so101_arm_grasp(so101_arm *a, so101_real rate, so101_real past, so101_real squeeze, so101_real empty, so101_real *at);
+/* The tip straight up to height z (m) at speed (m/s), without the table checks: the way out of a pose at
+ * the table. A joint at its range end stops it there with SO101_EPATH. */
+int so101_arm_rise(so101_arm *a, so101_real z, so101_real speed);
 int so101_arm_unfold(so101_arm *a);            /* from the start pose to it with the wrist straight up */
 int so101_arm_home(so101_arm *a);              /* from anywhere to the start pose, torque off */
 
 /* src/hal_posix.c: a serial port at 1 Mbaud on macOS or Linux. stop, log and tick are left NULL. */
 int so101_hal_posix_open(so101_hal *hal, const char *port);
 void so101_hal_posix_close(so101_hal *hal);
+
+/* src/sim.c: six simulated STS servos behind so101_hal, answering the packets the real ones do, on a clock of
+ * their own (a minute of moves runs in milliseconds), to try programs without an arm. A servo goes towards
+ * its goal faster the further it is, and not at all within SO101_SIM_DEAD steps of it (a real one's gearbox
+ * friction); its load grows slowly with that distance, fast when something holds the joint back. Nothing
+ * pulls it down: no gravity, no sag. */
+#define SO101_SIM_DEAD 12
+typedef struct {
+    uint8_t reg[SO101_NJ][256];     /* each servo's control table */
+    double pos[SO101_NJ];           /* raw steps */
+    int lo_block[SO101_NJ], hi_block[SO101_NJ];   /* raw steps a joint cannot pass (an object in the jaws); -1 none */
+    int held[SO101_NJ];             /* something held the joint back in the last millisecond */
+    double floor_z;                 /* m: the tip does not go below it (a table, a board); -1e9 none */
+    uint64_t now;                   /* us */
+    uint8_t rx[4096];
+    int rx_n, rx_at;
+    so101_model m;                  /* for the floor: the URDF, no offsets unless set here */
+    so101_servo_cal cal[SO101_NJ];
+} so101_sim;
+/* The servos holding cal (NULL: SO101_DEFAULT_CAL) at deg, calibrated degrees, torque off. */
+void so101_sim_init(so101_sim *s, const so101_servo_cal cal[SO101_NJ], const so101_real deg[SO101_NJ]);
+/* A HAL on s; stop, log and tick are left NULL. */
+void so101_hal_sim(so101_hal *hal, so101_sim *s);
+
+/* ---- fast runs on the arm (src/fast.c) --------------------------------------------------------- */
+
+/* The arm servos at f->torque_limit and f->acceleration for a run (on), or back at the arm's torque_limit
+ * and acceleration. */
+int so101_arm_fast(so101_arm *a, const so101_fast *f, int on);
+/* Replay a sampled run q[0..n-1], a tick every f->dt, the arm standing at q[0], until rest s after the
+ * last. Each arm joint's goal leads it by how a servo follows: where it should be f->dead later plus
+ * f->lag times its speed there, plus the sag compensation and fix[k] (learned; may be NULL). A joint
+ * err_max degrees from where it should be for 0.15 s, a load of 99 % for 0.4 s, or hal.stop() freezes every
+ * goal where its joint stands. tip (may be NULL): where the tip should be, for the ticks. pos and load (may
+ * be NULL) get what was read at each tick, for so101_path_learn. */
+int so101_arm_play(so101_arm *a, const so101_fast *f, const so101_real (*q)[SO101_NJ], int n, const so101_real (*tip)[3],
+                   const so101_real (*fix)[SO101_NA], so101_real rest, so101_real err_max, so101_real (*pos)[SO101_NJ],
+                   so101_real (*load)[SO101_NJ]);
 
 #ifdef __cplusplus
 }

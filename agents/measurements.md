@@ -48,7 +48,7 @@ so101_ik 34-36 microseconds, so101_ik_near 10, so101_ik_local 2-3, so101_collide
 so101_pose_eval 0.12-0.14. Across runs they move by up to three times with the core a process gets
 (AGENTS.md, Rules and traps), not with the precision.
 
-## On the arm (media/triangle.gif, media/triangle.jpg)
+## On the arm: the triangle (media/triangle.jpg)
 
 examples/triangle.py on an SO-101 follower with 12 V STS3215 servos, with the leader arm on a second
 USB port: unfold, move_to 20 12 18 cm, then move_by 8 cm left, 4 cm back and 7 cm up, 4 cm back and
@@ -64,7 +64,69 @@ flex, measured for that arm.
   the lift lags up to 4.7 degrees at 26 % load, the stick-slip of a loaded lift. An earlier run of
   the same moves: 5.7, 9.7 and 7.6 mm.
 - One sync read of position, load and current of all six servos: 2.2 ms.
-- media/triangle.gif: that run filmed by a camera beside the table, twice real speed;
-  media/triangle.jpg: frames of the earlier run. In both the planned triangle and the tip's trail
-  are drawn in through a calibrated camera model, from the servos' positions. The camera sees the
-  plane x = 20 cm nearly edge-on.
+- media/triangle.jpg: frames of the earlier run, filmed by a camera beside the table, the planned
+  triangle and the tip's trail drawn in through a calibrated camera model from the servos'
+  positions. The camera sees the plane x = 20 cm nearly edge-on.
+
+## Fast runs
+
+### The limits (the same follower, 12 V STS3215, 12.4 V at the servos)
+
+Measured before this library, with the Python driver it was ported from, on 2026-10-08:
+
+- A goal step on one joint at a time from the arm stretched out, read at 380 Hz: peak 166-197
+  degrees/s at Torque_Limit 500 (127 for the lift and elbow going up), 254-304 at 1000. Torque_Limit
+  caps the drive (the load reads 50 % throughout a step at 500): it halves the speed as well as the
+  force. The data sheet says 270 degrees/s at 12 V.
+- Each of pan, lift, elbow and wrist flex following a sinusoid of +-30 degrees streamed at 100 Hz
+  (periods 2.0 to 0.8 s, up to 236 degrees/s and 1850 degrees/s^2) at Torque_Limit 1000: with the
+  servo's own ramp (Acceleration 254) the joint lags 97-121 ms, more the faster; with Acceleration 0
+  74-86 ms at every frequency, which a first-order lag of 60 ms behind a dead time of 22 ms fits
+  (amplitude 0.89-0.92 at 1.25 Hz). Peak loads 74-93 % at 0.8 s.
+- A circle followed up to 253 degrees/s (1.15 times the limits); at 286 the shoulder stood at full
+  drive and the tip was 7.6 mm rms off. Hence vmax 220, amax 1500, top 295.
+
+### Planning (`uv run examples/figures/NAME.py --dry`, an M1)
+
+The ten figures at 24 cm, three laps, the pitch that makes a lap shortest, facing a viewer 1.5 m in
+front (within 0.03 s the same facing a camera 1.6 m away, 56 degrees to the arm's left), the wrist
+roll at -89:
+
+| figure | lap | tip up to | | figure | lap | tip up to |
+|---|---|---|---|---|---|---|
+| circle | 0.74 s | 127 cm/s | | heart | 1.68 s | 88 cm/s |
+| infinity | 1.23 s | 91 cm/s | | clover | 2.26 s | 91 cm/s |
+| triangle | 1.49 s | 99 cm/s | | star | 2.53 s | 93 cm/s |
+| square | 1.85 s | 95 cm/s | | spiral | 2.82 s | 105 cm/s |
+| flower | 3.16 s | 77 cm/s | | waves | 3.38 s | 57 cm/s |
+
+- Each plans in 20-60 ms (the whole `--dry` run, Python's start included, in 0.1-0.2 s). The Python
+  driver it was ported from took about 20 s for the same search and found the same lap: a 20 cm heart
+  in 1.47 s in both.
+- A heart plans up to 32 cm across (1.89 s a lap, the tip at up to 100 cm/s), facing either way.
+- make test: a 90-degree move of one joint takes 0.5558 s, the trapezoid d/v + v/a; a 20 cm circle's
+  fastest lap is 0.684 s in double and 0.685 in float, its ticks 6 micrometres off the circle at most;
+  on simulated servos the second replay follows 3 times closer than the first.
+
+### On the arm: the heart (media/heart.gif, media/heart.jpg)
+
+examples/figures/heart.py --size 30, facing the camera that filmed it (1.6 m away, 56 degrees to the
+arm's left, 28 up), the gripper pitch that makes a lap shortest, on 2026-10-15. Offsets 2.3, -5.9
+and -3.0 degrees on lift, elbow and wrist flex. The arm stood folded at torque-on and took the fast
+way out and back each time.
+
+| run | speed | lap | the tip from where it should be, rms / most | joints rms, at most | peak loads pan lift elbow wflex |
+|---|---|---|---|---|---|
+| half speed | 0.5 | 3.67 s | 3.6 / 11.1 mm | 0.4-0.6, 2.0 degrees | 32 42 37 36 % |
+| filmed | 1 | 1.84 s | 4.1 / 8.7 mm | 0.7-1.0, 2.5 degrees | 63 74 67 73 % |
+| learning, replay 1 | 1 | 1.84 s | 4.1 / 9.8 mm | 0.7-1.0, 2.4 degrees | 62 73 66 77 % |
+| replay 2 | 1 | | 1.7 / 6.6 mm | 0.3-0.4, 1.2 degrees | 61 74 68 76 % |
+| the run | 1 | | 1.2 / 5.4 mm | 0.1-0.2, 0.7 degrees | 61 74 68 76 % |
+
+- The filmed run: 8.7 s from the command to the torque off; the torque on 0.5 s after the command,
+  1.02 s out of the rest pose, three laps in 5.55 s (the tip at up to 93 cm/s), 1.02 s back. Ticks
+  10.0 ms apart in the median, 14 at most, in all three parts.
+- From the path whatever the moment, the filmed run's tip was 2.8 mm rms and 6.9 at most off; after
+  two learning replays 0.9 and 2.3.
+- The tip in these numbers is the model's at the servos' readings; gearbox play and bending parts
+  are not in them. In the film the trail drawn from them lies on the blurred gripper.

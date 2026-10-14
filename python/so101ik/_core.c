@@ -39,26 +39,36 @@ static PyObject *pose_deg(PoseObject *o, void *c) {
     }
     return d;
 }
+/* a new float64 array of n values */
+static PyObject *array_of(const so101_real *v, int n) {
+    npy_intp len = n;
+    PyObject *a = PyArray_SimpleNew(1, &len, NPY_DOUBLE);
+    if (!a) return NULL;
+    double *d = PyArray_DATA((PyArrayObject *)a);
+    for (int i = 0; i < n; i++) d[i] = v[i];
+    return a;
+}
+
 static PyObject *pose_joints(PoseObject *o, void *c) { return tuple_of(o->p.deg, SO101_NJ); }
-static PyObject *pose_tip(PoseObject *o, void *c) { return tuple_of(o->p.tip, 3); }
+static PyObject *pose_tip(PoseObject *o, void *c) { return array_of(o->p.tip, 3); }
 static PyObject *pose_pitch(PoseObject *o, void *c) { return PyFloat_FromDouble(o->p.pitch); }
 static PyObject *pose_torque(PoseObject *o, void *c) { return tuple_of(o->p.torque, SO101_NA); }
 static PyObject *pose_cost(PoseObject *o, void *c) { return PyFloat_FromDouble(o->p.cost); }
 static PyObject *pose_score(PoseObject *o, void *c) { return PyFloat_FromDouble(o->p.score); }
 static PyObject *pose_points(PoseObject *o, void *c) {
-    return Py_BuildValue("{s:N,s:N,s:N,s:N}", "elbow", tuple_of(o->p.elbow, 3), "wrist", tuple_of(o->p.wrist, 3),
-                         "roll", tuple_of(o->p.roll, 3), "tip", tuple_of(o->p.tip, 3));
+    return Py_BuildValue("{s:N,s:N,s:N,s:N}", "elbow", array_of(o->p.elbow, 3), "wrist", array_of(o->p.wrist, 3),
+                         "roll", array_of(o->p.roll, 3), "tip", array_of(o->p.tip, 3));
 }
 
 static PyGetSetDef pose_getset[] = {
     {"deg", (getter)pose_deg, NULL, "calibrated degrees by joint name, gripper 0-100", NULL},
     {"joints", (getter)pose_joints, NULL, "the six angles in chain order", NULL},
-    {"tip", (getter)pose_tip, NULL, "tip position, m", NULL},
+    {"tip", (getter)pose_tip, NULL, "tip position, m (a numpy array)", NULL},
     {"pitch", (getter)pose_pitch, NULL, "gripper pitch, degrees (0 forwards, -90 down)", NULL},
     {"torque", (getter)pose_torque, NULL, "N m each arm servo holds against gravity, pan to roll", NULL},
     {"cost", (getter)pose_cost, NULL, "sum of squared torques of lift, elbow, wrist flex, roll", NULL},
     {"score", (getter)pose_score, NULL, "cost and the comfort term", NULL},
-    {"points", (getter)pose_points, NULL, "elbow, wrist and roll axes' points and the tip", NULL},
+    {"points", (getter)pose_points, NULL, "elbow, wrist and roll axes' points and the tip (numpy arrays)", NULL},
     {NULL}};
 
 static PyObject *pose_repr(PoseObject *o) {
@@ -164,6 +174,56 @@ static PyObject *model_tip(ModelObject *self, PyObject *arg) {
     if (!read_deg(arg, deg)) return NULL;
     so101_tip(&self->m, deg, t, &pitch);
     return Py_BuildValue("(dddd)", t[0], t[1], t[2], pitch);
+}
+
+static PyObject *model_frames(ModelObject *self, PyObject *arg) {
+    so101_real deg[SO101_NJ], T[SO101_NL + 1][16];
+    if (!read_deg(arg, deg)) return NULL;
+    so101_link_frames(&self->m, deg, T);
+    PyObject *d = PyDict_New();
+    npy_intp dims[2] = {4, 4};
+    for (int k = 0; k <= SO101_NL; k++) {
+        PyObject *a = PyArray_SimpleNew(2, dims, NPY_DOUBLE);
+        if (!a) {
+            Py_DECREF(d);
+            return NULL;
+        }
+        double *v = PyArray_DATA((PyArrayObject *)a);
+        for (int i = 0; i < 16; i++) v[i] = T[k][i];
+        PyDict_SetItemString(d, so101_link_name(k), a);
+        Py_DECREF(a);
+    }
+    return d;
+}
+
+static PyObject *mesh_points;    /* built once: read-only arrays by link name */
+
+static PyObject *model_mesh_points(ModelObject *self, PyObject *noargs) {
+    if (!mesh_points) {
+        PyObject *d = PyDict_New();
+        for (int k = 0; k < SO101_NL; k++) {
+            const float(*pts)[3];
+            npy_intp dims[2] = {so101_link_points(k, &pts), 3};
+            PyObject *a = PyArray_SimpleNew(2, dims, NPY_DOUBLE);
+            if (!a) {
+                Py_DECREF(d);
+                return NULL;
+            }
+            double *v = PyArray_DATA((PyArrayObject *)a);
+            for (npy_intp i = 0; i < dims[0]; i++)
+                for (int c = 0; c < 3; c++) v[3 * i + c] = pts[i][c];
+            PyArray_CLEARFLAGS((PyArrayObject *)a, NPY_ARRAY_WRITEABLE);
+            PyDict_SetItemString(d, so101_link_name(k), a);
+            Py_DECREF(a);
+        }
+        mesh_points = d;
+    }
+    return PyDict_Copy(mesh_points);
+}
+
+static PyObject *model_pan_axis(ModelObject *self, void *c) {
+    so101_real xy[2] = {SO101_PAN_AXIS_X, SO101_PAN_AXIS_Y};
+    return array_of(xy, 2);
 }
 
 static PyObject *unreachable(int rc, const so101_real xyz[3]) {
@@ -300,6 +360,10 @@ static int field_set(ModelObject *self, PyObject *v, void *c) {
 static PyMethodDef model_methods[] = {
     {"pose", (PyCFunction)model_pose, METH_O, "pose(deg) -> Pose: forward kinematics and gravity torques"},
     {"tip", (PyCFunction)model_tip, METH_O, "tip(deg) -> (x, y, z, pitch)"},
+    {"frames", (PyCFunction)model_frames, METH_O,
+     "frames(deg) -> {link: 4x4 array}: each link's frame and the tip frame (gripper_frame_link) in the base frame"},
+    {"mesh_points", (PyCFunction)model_mesh_points, METH_NOARGS,
+     "mesh_points() -> {link: N x 3 array}: the surface points of each link's mesh in its own frame, about 4 mm apart"},
     {"ik", (PyCFunction)(void (*)(void))model_ik, METH_VARARGS | METH_KEYWORDS,
      "ik(x, y, z, roll=0, gripper=0, pitch=None, near=None) -> Pose: the least-loaded allowed pose; at pitch;\n"
      "or along a path from near. Raises Unreachable."},
@@ -310,7 +374,7 @@ static PyMethodDef model_methods[] = {
     {"set_ranges", (PyCFunction)model_set_ranges, METH_O, "set_ranges([(lo, hi)] * 5): calibrated ranges, degrees"},
     {NULL}};
 
-static PyGetSetDef model_getset[16];
+static PyGetSetDef model_getset[17];
 
 static PyTypeObject ModelType = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "so101ik.Model",
@@ -393,6 +457,8 @@ int arm_type_ready(PyObject *m, PyObject *fault, PyObject *unreachable, PyTypeOb
                    PyObject *(*new_pose)(const so101_pose *), int (*read_deg)(PyObject *, so101_real *),
                    int (*read3)(PyObject *, so101_real *));
 
+int path_functions_add(PyObject *m, PyTypeObject *model_type, PyObject *fault, PyObject *unreachable);   /* _path.c */
+
 static PyMethodDef module_methods[] = {
     {"fk_urdf", py_fk_urdf, METH_O, "fk_urdf(q) -> 4x4 tip frame for URDF degrees (LeRobot's forward_kinematics)"},
     {"ik_local", (PyCFunction)(void (*)(void))py_ik_local, METH_FASTCALL,
@@ -406,6 +472,7 @@ PyMODINIT_FUNC PyInit__core(void) {
     import_array();
     int k = 0;
     model_getset[k++] = (PyGetSetDef){"ranges", (getter)model_get_ranges, NULL, "calibrated ranges, degrees", NULL};
+    model_getset[k++] = (PyGetSetDef){"pan_axis", (getter)model_pan_axis, NULL, "where the pan axis stands, (x, y) m", NULL};
     model_getset[k++] = (PyGetSetDef){"offsets", (getter)model_get_offsets, (setter)model_set_offsets,
                                       "degrees from calibrated to URDF angles, pan to roll", NULL};
     for (size_t i = 0; i < sizeof FIELDS / sizeof FIELDS[0]; i++)
@@ -424,5 +491,6 @@ PyMODINIT_FUNC PyInit__core(void) {
     Py_INCREF(&ModelType);
     PyModule_AddObject(m, "Model", (PyObject *)&ModelType);
     if (arm_type_ready(m, Fault, Unreachable, &PoseType, new_pose, read_deg, read3) < 0) return NULL;
+    if (path_functions_add(m, &ModelType, Fault, Unreachable) < 0) return NULL;
     return m;
 }

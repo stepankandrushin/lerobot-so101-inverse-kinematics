@@ -2,22 +2,34 @@
 
 Inverse kinematics and a safe servo driver for the **SO-101 / SO-ARM101** robot arm (LeRobot's
 follower) in **C**, with a **Python** binding: a drop-in for **LeRobot's `RobotKinematics`** that is
-3.6 to 41 times faster, the least-loaded pose for any tip position, a mesh collision check, and moves
-that stop on a stall or an overload. C99 with no allocation, so it is ready for an **ESP32**.
+3.6 to 41 times faster, the least-loaded pose for any tip position, a mesh collision check, moves
+that stop on a stall or an overload, and **figures drawn in the air as fast as the servos go**. C99
+with no allocation, so it is ready for an **ESP32**.
 
-![An SO-101 follower unfolds, draws a triangle in the air with its gripper and folds home](media/triangle.gif)
+![An SO-101 follower unfolds, draws a 30 cm heart in the air with its gripper three times and folds back, in real time](media/heart.gif)
 
-*`examples/triangle.py` on an SO-101 follower, twice real speed: unfold, one move to a corner, three
-straight lines, home. The planned triangle (grey, seen nearly edge-on) and the tip's trail (yellow)
-are drawn in from the servos' positions.*
+*`examples/figures/heart.py --size 30` on an SO-101 follower, **in real time**: from the command to the
+torque off in 8.7 s. It unfolds from its rest pose in 1.0 s, draws a 30 cm heart three times in 5.6 s
+with its gripper's tip at up to 93 cm/s, and folds back in 1.0 s. The planned heart (grey) and the
+tip's trail (yellow) are drawn in from the servos' positions.*
 
 ```python
 from so101ik import Arm
 
-with Arm() as arm:                     # finds the port and LeRobot's calibration; unfolds the arm
-    arm.move_to(0.20, 0.12, 0.18)      # the tip to x, y, z in metres, in the pose gravity loads least
+with Arm() as arm:                     # finds the port and LeRobot's calibration; torque on
+    arm.move_to(0.20, 0.12, 0.18)      # unfolds, then the tip to x, y, z in metres, in the pose gravity loads least
     arm.move_by(0, 0.08, 0)            # a straight line 8 cm to the left
                                        # leaving the block folds the arm home, also after Ctrl-C
+```
+
+```python
+from so101ik import Arm
+from so101ik.fast import closed_run
+
+with Arm() as arm:
+    run = closed_run(arm.model, points, laps=3)   # a closed path of tip points 2 mm apart, planned whole
+    arm.run(run)                                  # from the rest pose to it and three laps at the servos' limits
+                                                  # leaving the block folds the arm back at the same pace
 ```
 
 ## What it does
@@ -34,6 +46,11 @@ with Arm() as arm:                     # finds the port and LeRobot's calibratio
   lines of the tip (`move_by`, `line_to`), on a minimum-jerk profile with goals every 20 ms. A joint
   that stalls or overloads stops the move. It checks the servos' EEPROM against the calibration
   before it starts, unfolds from the folded pose, and folds back home at the end.
+- **Fast runs, planned whole.** A closed path of the tip (a heart, a star, any curve) is solved every
+  2 mm in the gripper pitch that makes a lap shortest, timed at every joint's speed and acceleration
+  limit, and replayed at 100 Hz with each goal leading its joint by how the servo lags, at full
+  torque. A 24 cm heart is planned in 20 ms, a 30 cm one laps in 1.84 s. The arm unfolds from its
+  rest pose and folds back at the same pace.
 - **One C library underneath** (`include/so101ik.h`). C99, no heap, no file system, the serial port
   behind a small HAL. Single precision finds the same poses as double, to micrometres.
 
@@ -108,7 +125,7 @@ export SO101_PORT=/dev/tty.usbmodem58760431541    # lerobot-find-port tells whic
 
 or `Arm(port=..., calibration_file=...)`.
 
-## Run the sample
+## Run the samples
 
 Read the safety rules below first. Then, with the arm folded in its rest pose and nothing within its
 reach:
@@ -124,11 +141,37 @@ draws a triangle (8 cm along, 7 cm high) at 5 cm/s, and folds home. Every tick g
 
 Coordinates are metres in the base frame of the URDF: x forward, y to the arm's left, z up.
 
+### Figures, as fast as the servos go
+
+```sh
+uv run examples/figures/heart.py --dry      # plan it and print the timing: nothing moves, no arm needed
+uv run examples/figures/heart.py            # a 24 cm heart, three laps, in front of the arm
+uv run examples/figures/heart.py --size 30 --facing 0.8 1.2 0.9    # 30 cm, turned towards a camera there
+uv run examples/figures/show.py circle star heart                  # three in one run
+```
+
+The figures in `examples/figures/`: circle, square, triangle, star, infinity, heart, waves, spiral,
+clover, flower, each a script that holds its coordinates (`POINTS`) and nothing else; `show.py` runs
+several in a row, `dance.py` nine with the jaws and the wrist's roll moving on top. A new figure is a
+copy of `heart.py` with other `POINTS`: a closed curve, x to the right and y up, in any unit, or up to 20
+corners of a polygon.
+
+- The figure lies in a plane 30 cm from the shoulder that faces `--facing` (metres in the base frame;
+  by default a viewer 1.5 m in front and 75 cm up), up to 32 cm across.
+- The arm unfolds from its rest pose straight to the figure's first point, draws `--laps` laps
+  without a stop, and folds back, each at the limits. `--speed 0.5` halves every speed.
+- `--pitch fast` (the default) takes the gripper pitch along the lap that makes it shortest, `least`
+  the least-loaded poses, `facing` the gripper pointed at the `--facing` point's height.
+- `--learn 2` replays the run twice first, each time correcting the goals by what the joints were off
+  (the 30 cm heart's tip: 4.1 mm rms from where it should be, then 1.7, then 1.2).
+- The wrist roll and gripper stay as the arm stands; with `--dry`, 0 unless `--roll` and `--gripper`
+  say.
+
 ## Safety
 
 - **Start folded.** The arm unfolds from its rest pose (lift and elbow against their stops, gripper on
-  the table in front of the base) and folds back to exactly where it started. Started anywhere else,
-  it does not unfold, and home is the fold found from the calibration's ranges.
+  the table in front of the base) on its first move, and folds back to exactly where it started.
+  Started anywhere else, it does not unfold, and home is the fold found from the calibration's ranges.
 - **Clear the table.** The library knows the table plane and the arm's own parts, nothing else.
   Keep other things out of the arm's reach, or keep the targets well above them.
 - **Ctrl-C** stops the move and the arm folds home. A **second Ctrl-C** switches the torque off and
@@ -138,6 +181,17 @@ Coordinates are metres in the base frame of the URDF: x forward, y to the arm's 
   stands, the call raises `Fault`, and leaving the `with` block folds the arm home.
 - **The servos are limited** at torque-on: Torque_Limit at most 500 (50 %) and Acceleration 254,
   written to RAM, so a power cut restores the servos' own.
+- **A fast run is not limited.** For a figure the arm servos get Torque_Limit 1000 (full) and
+  Acceleration 0, and the tip moves at more than 1 m/s; 500 and 254 come back when the arm is folded,
+  after a stop, and at the next torque-on. The run stops (every goal where its joint stands, then home
+  at the slow pace) when a joint is 12 degrees from where it should be for 0.15 s (6 on the way out of
+  the rest pose and back), at full load for 0.4 s, or on Ctrl-C. Nothing within the arm's reach.
+- **The limits are a 12 V follower's** (STS3215, 12 V): joints planned at up to 220 degrees/s. A 7.4 V
+  arm's servos are slower: start with `--speed 0.6`, and if a run stops with a joint behind, go
+  slower.
+- **The fast way out of the rest pose needs room.** It is taken when the model finds the way clear
+  with lift, elbow and wrist flex 6 degrees off; an arm whose folded gripper lies on the table in the
+  model (offsets of 0, often) unfolds and folds at the slow moves' pace instead.
 - **It refuses another arm's calibration**: if a servo's Homing_Offset or limits differ from the
   file, nothing moves.
 - **One program on the bus at a time.** Not while LeRobot (teleoperation, recording) uses the same
@@ -150,8 +204,8 @@ from so101ik import Arm, Model, RobotKinematics, Pose, Unreachable, Fault, Setup
 ```
 
 **`Arm(port=None, calibration_file=None, offsets=None, name=None, out="outputs/so101ik")`**: the
-follower, for a `with` block (torque on and unfolded at the start; folded home and torque off at the
-end, also after an error).
+follower, for a `with` block (torque on at the start, and the first move unfolds it from its rest pose;
+folded home and torque off at the end, also after an error).
 
 | | |
 |---|---|
@@ -159,9 +213,10 @@ end, also after an error).
 | `move_by(dx, dy, dz, speed=0.05)` | the tip along a straight line from where it is, peak speed in m/s |
 | `line_to(x, y, z, speed=0.05)` | the tip along a straight line to a point |
 | `move_joints(target, speed=30, check=True)` | joints to angles: a dict by joint name, or all six |
+| `run(run, learn=0, name="run", speed=1)` | a fast run (below): from the rest pose to its first point at `speed` of the limits, `learn` correcting replays, the run. Leaving the block folds back at that pace. Returns its errors |
 | `read()` | `(degrees, load %, mA)`, each a dict by joint |
 | `home()` | fold to the start pose and switch the torque off |
-| `pose`, `offsets`, `raw` | the last pose reached, the offsets, the C arm (`raw.tick`, `raw.sag`, `raw.lag_max`, `raw.load_max`) |
+| `model`, `pose`, `offsets`, `raw` | a `Model` with the arm's calibration and offsets, the last pose reached, the offsets, the C arm (`raw.tick`, `raw.sag`, `raw.lag_max`, `raw.load_max`) |
 
 Joint angles are LeRobot's calibrated degrees (0 in the middle of each calibrated range), the
 gripper 0 (closed) to 100. The joints: `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`,
@@ -177,6 +232,17 @@ that come too close. Settings: `payload` (kg in the jaws), `table_z`, `margin`, 
 
 **`Pose`**: `deg` (a dict by joint), `joints`, `tip` (m), `pitch`, `torque` (N m each servo holds),
 `cost`, `score`.
+
+**Fast runs** (`so101ik.fast`). `closed_run(model, points, laps=1, pitch="fast", speed=1, roll=0,
+gripper=0, name="path")` plans a closed path of tip points (N x 3 m, about 2 mm apart, the last the
+first) into a `Run`: `q` (the six joints every 10 ms), `tips`, `parts` (each figure's laps, fastest lap,
+peak speeds). `pitch` is `"fast"`, `"least"` or degrees (one, or one a point); `Unreachable` if no pose
+gets round. `join(model, runs)` puts runs one after the other, `check(model, run)` raises `Fault` if a
+joint would leave its range less 2 degrees or turn faster than 295 degrees/s, or two parts come within
+2 cm. `SETTINGS` holds the limits (`vmax` 220 degrees/s, `amax` 1500 degrees/s^2, `dt` 0.01 s, the
+servo's `lag` and `dead` time, `gap`, `err_max`); every call takes `settings=` to change them.
+`so101ik.figures` lays a figure's coordinates into a plane: `Plane(facing)`, `outline(points, size)`,
+`figure(model, plane, name, points, size, laps)`, and `draw(name, points)`, the examples' command line.
 
 **`RobotKinematics(urdf_path=None, target_frame_name="gripper_frame_link", joint_names=None)`**:
 LeRobot's class with the same calls. To use it in LeRobot's end-effector examples and processors,
@@ -232,6 +298,22 @@ if (arm.torque) so101_arm_home(&arm);      /* folds, then torque off */
 so101_hal_posix_close(&hal);
 ```
 
+A fast run in C (`src/path.c` plans, `src/fast.c` drives), the buffers the caller's:
+
+```c
+so101_fast f;
+so101_fast_init(&f);                       /* the limits: 220 degrees/s, 1500 degrees/s^2, a tick every 10 ms */
+so101_path_fastest(&m, xyz, n, roll, grip, &f, pitch, q, &lap, work);   /* a closed path's joints, n points */
+so101_path_time(q, n, 3, &f, t);           /* three laps at the limits */
+int k = so101_path_sample(q, n, 3, t, 1, &f, ticks, NULL, cap);         /* the joints every 10 ms */
+if (!so101_run_check(&m, ticks, k, &f, why, sizeof why) && !so101_arm_fast(&arm, &f, 1))
+    rc = so101_arm_play(&arm, &f, ticks, k, NULL, NULL, 0.3, f.err_max, NULL, NULL);
+so101_arm_fast(&arm, &f, 0);               /* Torque_Limit and Acceleration back */
+```
+
+`so101_unfold_path` and `so101_unfold_clear` give the way from the rest pose to a run and back,
+`so101_path_learn` the corrections for the next replay.
+
 Another board is another `so101_hal`: write, read with a timeout, drain, a microsecond clock, sleep,
 and optional stop, log and tick callbacks. `-DSO101_FLOAT` makes `so101_real` a float, `-DSO101_SMALL`
 leaves out a 180 KB point cache, and `-DSO101_NO_POSIX` compiles `hal_posix.c` to nothing. The IK
@@ -250,6 +332,7 @@ over Wi-Fi, Bluetooth or buttons: [agents/esp32.md](agents/esp32.md).
 make test                               # the C library in double, float, and float without the cache
 make example                            # examples/ik.c
 uv run examples/kinematics.py           # the Python binding, no arm
+uv run examples/figures/heart.py --dry  # a fast run planned, no arm
 uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-tinyxml2<11' \
     tools/bench.py --lerobot ../lerobot --urdf ../SO-ARM100/Simulation/SO101/so101_new_calib.urdf
 make model                              # src/model.c again from SO-ARM100's URDF and meshes
