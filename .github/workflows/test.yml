@@ -1,5 +1,5 @@
-# The C library in double, float and float without the point cache, the C example, and the Python
-# binding built and run without an arm, on Linux and macOS.
+# The C library in double, float and float without the point cache, the C example, the Python
+# binding built and run without an arm, and the sdist and a wheel built from it, on Linux and macOS.
 name: test
 
 on:
@@ -20,3 +20,4 @@ jobs:
       - run: make example
       - run: uv sync
       - run: uv run examples/kinematics.py
+      - run: uv build

@@ -39,8 +39,8 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
   with src/.
 - tools/: gen_model.py (src/model.c from the URDF and its meshes), bench.py, run_stats.py.
   test/test.c is make test. examples/: triangle.py (the arm), kinematics.py and ik.c (no arm).
-- media/: the README's picture. .github/workflows/test.yml: make test, make example and the Python
-  binding on Linux and macOS.
+- media/: the README's pictures. .github/workflows/test.yml: make test, make example, the Python
+  binding and `uv build` on Linux and macOS.
 
 ## Rules and traps
 
@@ -58,6 +58,8 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
   only, never a write, since one of them may be a leader arm or another device.
 - uv rebuilds the extension when a .c or .h changes (cache-keys in pyproject.toml). The .so lands in
   python/so101ik/, git-ignored.
+- MANIFEST.in puts the headers into the sdist (setuptools takes only the .c files it compiles): a new
+  header or file the build needs goes there too, or a wheel from the sdist fails. CI's `uv build` checks it.
 - The IK keeps its samples in static memory and its plane in the model: one thread at a time.
 - On macOS a process can run on an efficiency core, and a timing then differs by up to 3 times from
   one run to the next: compare speeds in one process with the calls interleaved, as bench.py does.

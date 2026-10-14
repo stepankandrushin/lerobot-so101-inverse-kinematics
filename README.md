@@ -60,7 +60,8 @@ other figures and the runs on the arm: [agents/measurements.md](agents/measureme
 - An **SO-101 follower** arm, assembled, its servo ids set and **calibrated with LeRobot**
   (`lerobot-setup-motors`, `lerobot-calibrate`). LeRobot is needed for that, not to run this.
 - **macOS or Linux.** On Linux, your user in the `dialout` group for the serial port
-  (`sudo usermod -aG dialout $USER`, then log in again).
+  (`sudo usermod -aG dialout $USER`, then log in again). It has driven arms from macOS; on Linux it
+  builds and passes its tests, but has not driven an arm yet: reports welcome.
 - **Python 3.12+** and **[uv](https://docs.astral.sh/uv/)** (or pip).
 - **A C compiler**: on macOS `xcode-select --install`, on Debian or Ubuntu
   `sudo apt install build-essential`.
