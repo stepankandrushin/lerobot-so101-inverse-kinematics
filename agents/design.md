@@ -117,9 +117,46 @@ joints were moved to, their stops, so the fold follows each arm's own calibratio
 - so101_hal is the board: write, read with a timeout, drain, a microsecond clock, sleep, and stop, log
   and tick for the caller. src/hal_posix.c is macOS and Linux (1 Mbaud by IOSSIOSPEED on macOS,
   IOSSDATALAT 1 microsecond); the Python binding adds stop (PyErr_CheckSignals, so Ctrl-C freezes
-  the move), log and the CSV.
+  the move, and Arm.stop()), log, the CSV and on_tick, and lets go of the GIL while it sleeps or waits
+  on the port, so other threads run during a move; one call at a time has the port.
 - The joint path check uses no gap: two parts' surface points never come closer than 0, so it
   catches the table only.
+- Every move runs on one loop (run() in arm.c: the wanted angles from a path at each tick, the goals
+  sent with the sag, one sync read, the tick reported, the stall and overload rules), whole in C from
+  the data its call was given: a target, a chain, the gripper's rate. Nothing calls back into the
+  program to steer a move, so a board can run one from a command that came over a link
+  (agents/esp32.md). The stall rule keeps a position every 10 ms (64 of them), so its 0.3 s fit at
+  any tick.
+- **so101_arm_follow**: a chain the caller planned, linearly between its poses, refused if its first
+  pose lies over start_max (5) degrees from the goals, two neighbours more than 3 apart, or a pose a
+  degree outside the ranges; nothing else is checked. The duration comes from the tips' path length
+  and the speed (1.875 times it on the minimum-jerk profile, the profile's peak), at least 0.3 s.
+  line_to, move_by and rise go through it.
+- **The lead** (follow's lead): a servo stands still until its goal is 1-1.5 degrees away (gearbox
+  friction under P control), so along a chain each joint trails its goal and stops short of it. Each
+  of pan, lift, elbow and wrist flex is led ahead by what it lags: lead += lead_rate x dt x lag where
+  the lag is over lead_min (0.1 degrees), clipped to lead_max (1.6), kept from one chain to the next
+  (0 at torque-on and after a press). With within (0.25) the hold ends once the joints stand that close
+  to the last pose, else after settle. Simulated (test/test_arm.c): 1.1 degrees short unled, 0.15 led.
+- **A press** (follow's press, lowering until contact): over the free stretch (0.15 to 0.5 of the
+  duration) the tip from the servos' positions trails its goal by a steady height; after it, once that
+  gap is press higher than its median for press_ticks ticks running, the move stops. At contact or at
+  the chain's end the goals go where the joints stand (the gripper's as it was), the lead to 0, held
+  for settle, and contact says which. The tip's height is what changes when something under it holds
+  it up; one joint's lag alone misses a tip that slides.
+- **so101_arm_grasp**: the gripper's goal closes at rate percent/s until the jaw has stood within 0.5
+  percent for 0.25 s with the goal past percent beyond it, or the goal reaches 0. Short of empty it
+  holds nothing; else the goal goes squeeze past where the jaw stopped and holds 0.4 s, the jaw locked
+  on what it holds as long as the servo ramps to the goal (Acceleration 254: at 0 it lets go for a tick
+  and grips again from open, wider). The overload rule leaves the gripper alone here: pressing is the
+  point, and Torque_Limit caps it.
+- **The simulated servos** (src/sim.c, so101_sim): each servo's control table answers the packets of
+  sts.c (ping, read, write, sync read, sync write), and between packets the servos move a millisecond
+  at a time on a clock of their own: towards the goal at 20 steps/s per step of distance up to 2300
+  steps/s, not at all within 12 steps (the friction the lead is for); the load 0.1 percent a step of
+  distance, 0.8 when something holds the joint back. A floor stops the whole arm where the tip would
+  pass below it; a block stops one joint (an object in the jaws). No gravity and no sag: it tries a
+  program's logic and the library's rules, not the accuracy of a real arm.
 
 ## Fast runs (src/path.c, src/fast.c, python/so101ik/fast.py)
 

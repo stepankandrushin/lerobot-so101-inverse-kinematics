@@ -141,6 +141,12 @@ draws a triangle (8 cm along, 7 cm high) at 5 cm/s, and folds home. Every tick g
 
 Coordinates are metres in the base frame of the URDF: x forward, y to the arm's left, z up.
 
+**Without an arm**, `SO101_PORT=sim` (or `Arm(port="sim")`) runs a program on six simulated servos
+that answer the same packets on a clock of their own, so a minute of moves takes a moment:
+`SO101_PORT=sim uv run examples/triangle.py`. They lag their goals as real ones do (a degree of
+friction), and `arm.sim(floor=..., block=...)` puts a surface under the tip or an object in the jaws.
+No gravity, so it tries a program's logic, not its accuracy.
+
 ### Figures, as fast as the servos go
 
 ```sh
@@ -203,20 +209,32 @@ corners of a polygon.
 from so101ik import Arm, Model, RobotKinematics, Pose, Unreachable, Fault, SetupError
 ```
 
-**`Arm(port=None, calibration_file=None, offsets=None, name=None, out="outputs/so101ik")`**: the
-follower, for a `with` block (torque on at the start, and the first move unfolds it from its rest pose;
-folded home and torque off at the end, also after an error).
+**`Arm(port=None, calibration_file=None, offsets=None, name=None, out="outputs/so101ik", on_tick=None)`**:
+the follower, for a `with` block (torque on at the start, and the first move unfolds it from its rest
+pose; folded home and torque off at the end, also after an error). `on_tick(dict)` is called at every
+tick of a move (time, step, goal, pos, load, ma, tip, target), to watch it.
 
 | | |
 |---|---|
 | `move_to(x, y, z, pitch=None, speed=30)` | the tip to a point (m) in the least-loaded allowed pose, or at a gripper pitch (degrees, 0 forwards, -90 down); straight in joint space, peak speed in degrees/s. Returns the `Pose` |
 | `move_by(dx, dy, dz, speed=0.05)` | the tip along a straight line from where it is, peak speed in m/s |
 | `line_to(x, y, z, speed=0.05)` | the tip along a straight line to a point |
-| `move_joints(target, speed=30, check=True)` | joints to angles: a dict by joint name, or all six |
+| `move_joints(target, speed=30, check=True, step="joints")` | joints to angles: a dict by joint name, or all six |
+| `follow(poses, speed=0.03, duration=None, steady=False, settle=0.3, within=0, lead=False, press=0, free=(0.15, 0.5), press_ticks=3, step=None)` | through a chain of poses you planned (Poses, dicts or six angles), linearly between them, on one minimum-jerk profile (`steady`: at a steady pace). `lead`: each joint's goal led ahead by what it lags, so the joints end on the last pose and not a degree short (`lead` stays for the next chain); `within`: the hold after it ends once they stand that close (degrees). `press` (m): lowering until contact: it stops once the tip, from the servos, stands that much higher above its goal than in the `free` stretch, and the goals go where the joints stand. Returns whether it touched |
+| `grasp(rate=40, past=3, squeeze=2.5, empty=4, step="grasp")` | close the jaws at `rate` percent/s until they stop on something, then press `squeeze` past it; returns where they stopped (under `empty`: nothing held) |
+| `rise(z, speed=0.01)` | the tip straight up to height `z`, without the table checks: the way out of a pose at the table |
 | `run(run, learn=0, name="run", speed=1)` | a fast run (below): from the rest pose to its first point at `speed` of the limits, `learn` correcting replays, the run. Leaving the block folds back at that pace. Returns its errors |
 | `read()` | `(degrees, load %, mA)`, each a dict by joint |
 | `home()` | fold to the start pose and switch the torque off |
-| `model`, `pose`, `offsets`, `raw` | a `Model` with the arm's calibration and offsets, the last pose reached, the offsets, the C arm (`raw.tick`, `raw.sag`, `raw.lag_max`, `raw.load_max`) |
+| `stop()` | the move running, or the next, stops at its next tick and raises `Fault`; from any thread, a signal handler or `on_tick` |
+| `check()`, `torque_on()`, `unfold()`, `torque_off()`, `close()`, `log(text)` | for a program that drives the arm without the `with` block (and `unfold_first = False` in a subclass that unfolds its own way) |
+| `sim(floor=None, block=None, pose=None)` | the simulated arm's world (`port="sim"`): a surface the tip stops at (m), joints blocked at angles (`{"gripper": (12, None)}`: an object in the jaws), the servos put at a pose |
+| `model`, `pose`, `goal`, `offsets`, `raw` | a `Model` with the arm's calibration and offsets, the pose last reached along the tip (settable: line_to goes on from it), the angles last sent, the offsets, the C arm (`raw.tick`, `raw.sag`, `raw.lag_max`, `raw.load_max`, `raw.lead_rate`, `raw.start_max`) |
+| `step`, `lead`, `contact`, `table_z`, `torque`, `folded`, `start_pose` | what the arm is doing (the log's and the CSV's name for it; settable), the lead, whether the last press touched, the table for the arm's checks, the torque, whether it stood folded at torque-on, where `home()` goes |
+
+Every move is one call with its data (a point, a chain of poses, the gripper's rate) that the C
+library runs whole, its ticks, checks and stops included, and Python waits on it without holding the
+GIL, so a camera's thread goes on meanwhile. The same calls can later go to a board over a link.
 
 Joint angles are LeRobot's calibrated degrees (0 in the middle of each calibrated range), the
 gripper 0 (closed) to 100. The joints: `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`,
@@ -227,11 +245,15 @@ gripper 0 (closed) to 100. The joints: `shoulder_pan`, `shoulder_lift`, `elbow_f
 pose at a given pitch, or with `near=pose` the next pose of a path close to that one; it raises
 `Unreachable` when no allowed pose reaches the point. `pose(deg)` is the forward kinematics with the
 gravity torques, `problems(pose)` lists why a pose is not allowed, `collides(pose)` names two parts
-that come too close. Settings: `payload` (kg in the jaws), `table_z`, `margin`, `gap`, `offsets`;
-`ranges` (set with `set_ranges`). `stock=True` is LeRobot's view: the URDF's limits, no table, no meshes.
+that come too close. `frames(deg)` gives each link's frame and the tip frame (4x4 by URDF link name,
+`gripper_frame_link` the tip), `mesh_points()` each link's surface points in its own frame (about 4 mm
+apart: the collision check's), `pan_axis` where the pan axis stands. Settings: `payload` (kg in the jaws),
+`table_z`, `margin`, `gap`, `collisions`, `base_rule`, `offsets`; `ranges` (set with `set_ranges`).
+`stock=True` is LeRobot's view: the URDF's limits, no table, no meshes.
 
-**`Pose`**: `deg` (a dict by joint), `joints`, `tip` (m), `pitch`, `torque` (N m each servo holds),
-`cost`, `score`.
+**`Pose`**: `deg` (a dict by joint), `joints`, `tip` (m, a numpy array), `pitch`, `torque` (N m each servo
+holds), `cost`, `score`, `points` (the elbow, wrist and roll axes and the tip). A Pose does not change:
+`model.pose(dict(p.deg, gripper=40))` is the same pose with the jaws open.
 
 **Fast runs** (`so101ik.fast`). `closed_run(model, points, laps=1, pitch="fast", speed=1, roll=0,
 gripper=0, name="path")` plans a closed path of tip points (N x 3 m, about 2 mm apart, the last the
@@ -313,6 +335,22 @@ so101_arm_fast(&arm, &f, 0);               /* Torque_Limit and Acceleration back
 
 `so101_unfold_path` and `so101_unfold_clear` give the way from the rest pose to a run and back,
 `so101_path_learn` the corrections for the next replay.
+
+A chain of poses planned by the caller (`so101_follow` says how: speed or duration, a steady pace, the
+lead, lowering until contact), the gripper closed on an object, and the tip straight up:
+
+```c
+so101_follow o;
+so101_follow_init(&o);
+o.lead = 1, o.within = 0.25;               /* the joints held on the chain, ending within a quarter degree */
+rc = so101_arm_follow(&arm, q, n, &o);     /* q: n poses, six calibrated angles each, 2 mm apart say */
+so101_real at;
+rc = so101_arm_grasp(&arm, 40, 3, 2.5, 4, &at);
+rc = so101_arm_rise(&arm, 0.10, 0.01);
+```
+
+`so101_link_frames` and `so101_link_points` give each link's frame and mesh points. `src/sim.c` is the
+simulated servos behind a `so101_hal` (`so101_sim_init`, `so101_hal_sim`); `make test` drives them.
 
 Another board is another `so101_hal`: write, read with a timeout, drain, a microsecond clock, sleep,
 and optional stop, log and tick callbacks. `-DSO101_FLOAT` makes `so101_real` a float, `-DSO101_SMALL`

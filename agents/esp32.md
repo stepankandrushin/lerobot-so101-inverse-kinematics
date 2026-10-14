@@ -51,6 +51,16 @@ point cache left out with -DSO101_SMALL (`make test` runs both and checks them a
 - Commands, one a line or a packet: `move_to x y z [pitch]` (so101_arm_move_to), `move_by dx dy dz`
   (so101_arm_move_by), `line_to x y z`, `home`, `stop`, `state` (the tip, the joints, the last error).
   Millimetres on the wire, metres inside.
+- A program that plans its own moves on a desktop (the IK there, a camera, its own rules) sends them as
+  data: `follow` with a chain of poses (six angles each, up to MAXLINE, 512, so 12 KB of floats) and
+  so101_follow's settings, `grasp rate past squeeze empty`, `rise z`, `move_joints`, `read`. Each runs
+  whole on the board, its ticks, stops and lead there, and answers with its result (contact, where the
+  jaws stopped, the error) and the pose it ended in. That is what the Python Arm already does through
+  the C library in its own process: every call is one such command, and nothing steers a move from
+  outside while it runs but a stop. Telemetry (so101_tick, every 20 ms) can stream back, for a log or a
+  status line, without the move waiting for it.
+- Before a board exists, the link can be developed against src/sim.c's simulated servos on a desktop,
+  the same packets on a clock of their own: `SO101_PORT=sim`.
 - Wi-Fi: UDP or a WebSocket on the ESP32; Bluetooth: a GATT characteristic to write commands to
   (the Nordic UART service, which phone apps speak); buttons: each press a move_by of a few
   millimetres along one axis, held down a stream of them.

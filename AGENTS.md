@@ -14,10 +14,12 @@ CLAUDE.local.md may say where such notes live.
 
 ```sh
 uv sync                                 # builds the C extension so101ik._core (again when a source changes)
-make test                               # the C library alone, in double, float and float with SO101_SMALL
+make test                               # the C library alone, in double, float and float with SO101_SMALL, and
+                                        # the arm's moves on simulated servos (test/test_arm.c)
 make example                            # examples/ik.c, the kinematics from C
 uv run examples/kinematics.py           # the Python binding, no arm
 uv run examples/triangle.py             # moves the arm: README.md, Safety
+SO101_PORT=sim uv run examples/triangle.py   # the same on simulated servos (src/sim.c), no arm
 uv run examples/figures/heart.py --dry  # a fast run planned and printed, no arm; without --dry it drives the arm
 uv run tools/run_stats.py outputs/so101ik/NAME.csv    # how closely a run's tip followed its lines
 uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-tinyxml2<11' \
@@ -35,14 +37,15 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
   check), ik.c (the IK and the local solver), path.c (fast runs planned: poses along a path, the
   timing, the ticks, the fastest pitch, learning, the way out of the rest pose), sts.c and sts.h (the
   servos' packets), arm.c (the moves), fast.c (fast runs driven), hal_posix.c (the serial port on
-  macOS and Linux), model.c (generated), so101ik_internal.h (what the sources share).
+  macOS and Linux), sim.c (simulated servos behind a so101_hal, port "sim"), model.c (generated),
+  so101ik_internal.h (what the sources share).
 - python/so101ik/: __init__.py (Arm, Model, RobotKinematics, the port and calibration search),
   fast.py (fast runs: Run, closed_run, join, check, and what Arm.run and the way home call),
   figures.py (a figure's coordinates into a plane, the examples' command line, the dance), _core.c,
   _arm.c and _path.c (the CPython binding; _path.c is path.c on numpy arrays). setup.py builds them
   with src/.
 - tools/: gen_model.py (src/model.c from the URDF and its meshes), bench.py, run_stats.py.
-  test/test.c is make test. examples/: triangle.py (the arm), kinematics.py and ik.c (no arm),
+  test/test.c and test/test_arm.c (the moves on sim.c) are make test. examples/: triangle.py (the arm), kinematics.py and ik.c (no arm),
   figures/ (one script a figure, show.py, dance.py).
 - media/: the README's pictures. .github/workflows/test.yml: make test, make example, the Python
   binding and `uv build` on Linux and macOS.
@@ -69,6 +72,14 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
 - On macOS a process can run on an efficiency core, and a timing then differs by up to 3 times from
   one run to the next: compare speeds in one process with the calls interleaved, as bench.py does.
 - One program on a servo bus at a time: LeRobot's and this driver's packets collide.
+- Every Arm call is one command with its data, run whole by the C library: no Python steers a move
+  while it runs (callbacks only watch: log, on_tick; stop() asks), so the same calls can later go to a
+  board over a link (agents/esp32.md). A new move takes its data at the start and runs in arm.c.
+- The binding lets go of the GIL while it sleeps or waits on the port, and one call at a time has the
+  port (take/TAKE in _arm.c): another thread's call fails, a call from inside a move (a signal handler,
+  on_tick) may only switch the torque off.
+- Arm's subclasses (other programs' own arms) override unfold, lost and unfold_first: a private helper
+  of Arm's named like a method of theirs replaces it, so keep Arm's own helpers few and underscored.
 - A fast run's limits (so101_fast_init: 220 degrees/s, 1500 degrees/s^2, a lag of 60 ms behind 22)
   were measured on one 12 V follower at Torque_Limit 1000 and Acceleration 0 (agents/measurements.md).
   A change to them, to the stop rules or to so101_unfold_path is a change to what the arm does at
