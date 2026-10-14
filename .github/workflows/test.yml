@@ -15,7 +15,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0     # setup-uv publishes full versions only, no v10 tag
       - run: make test
       - run: make example
       - run: uv sync
