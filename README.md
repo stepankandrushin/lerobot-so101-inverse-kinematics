@@ -75,8 +75,17 @@ uv sync                                 # builds the C extension
 uv run examples/kinematics.py           # the kinematics alone: no arm needed
 ```
 
-To use it from another project: `uv add git+https://github.com/stepankandrushin/lerobot-so101-inverse-kinematics`
-(or `pip install git+https://...`, which compiles it the same way).
+To use it from another project, with uv:
+
+```sh
+uv add git+https://github.com/stepankandrushin/lerobot-so101-inverse-kinematics
+```
+
+or with pip:
+
+```sh
+pip install git+https://github.com/stepankandrushin/lerobot-so101-inverse-kinematics
+```
 
 ## The port and the calibration
 
