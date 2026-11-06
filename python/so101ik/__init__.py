@@ -463,6 +463,16 @@ class Arm:
         """Goals to where the joints stand, the RAM settings, torque on; the start pose is recorded."""
         self._arm.torque_on()
 
+    def adopt_powered(self) -> None:
+        """Resume already powered servos without writing registers or resetting their goals.
+
+        Refuses unpowered motors, mismatched calibration or incompatible RAM settings.
+        Existing sag compensation is inverted into goal; earlier lead is absorbed there.
+        Plan recovery against both read() and goal before issuing the next movement.
+        The caller must ensure the previous driver has closed the bus.
+        """
+        self._arm.adopt_powered()
+
     def torque_off(self) -> None:
         """Torque off: the arm drops. Allowed from inside a move too (a second Ctrl-C's handler)."""
         self._arm.torque_off()

@@ -277,6 +277,12 @@ static PyObject *arm_torque_on(ArmObject *self, PyObject *noargs) {
     return call_done(self, so101_arm_torque_on(&self->arm));
 }
 
+static PyObject *arm_adopt_powered(ArmObject *self, PyObject *noargs) {
+    OPEN(self);
+    TAKE(self);
+    return call_done(self, so101_arm_adopt_powered(&self->arm));
+}
+
 static PyObject *arm_torque_off(ArmObject *self, PyObject *noargs) {
     OPEN(self);
     if (!take(self, 1)) return NULL;
@@ -662,6 +668,7 @@ static PyMethodDef arm_methods[] = {
     {"read", (PyCFunction)arm_read, METH_NOARGS, "read() -> (degrees, load %, mA), dicts by joint"},
     {"where", (PyCFunction)arm_where, METH_NOARGS, "where() -> (x, y, z, pitch): the tip from one read of the positions"},
     {"torque_on", (PyCFunction)arm_torque_on, METH_NOARGS, "goals to the present positions, RAM settings, torque on"},
+    {"adopt_powered", (PyCFunction)arm_adopt_powered, METH_NOARGS, "adopt already powered servos without register writes"},
     {"torque_off", (PyCFunction)arm_torque_off, METH_NOARGS, "torque off: the arm drops"},
     {"move_joints", (PyCFunction)(void (*)(void))arm_move_joints, METH_VARARGS | METH_KEYWORDS,
      "move_joints(target, speed=30, check=True, step='joints'): straight in joint space, peak deg/s of the joint that\n"

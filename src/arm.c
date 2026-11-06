@@ -280,6 +280,78 @@ int so101_arm_torque_on(so101_arm *a) {
     return SO101_OK;
 }
 
+int so101_arm_adopt_powered(so101_arm *a) {
+    if (a->torque) return fail(a, SO101_ESTATE, "this driver already owns the powered arm");
+    if (!isfinite(a->sag) || a->sag < 0)
+        return fail(a, SO101_ESTATE, "adoption needs finite nonnegative sag compensation");
+    int rc = so101_arm_check(a);
+    if (rc) return rc;
+    for (int j = 0; j < SO101_NJ; j++) {
+        uint8_t id = (uint8_t)a->cal[j].id, d[2];
+        if (so101_sts_read(&a->hal, id, STS_TORQUE_ENABLE, d, 1))
+            return fail(a, SO101_EIO, "cannot read %s torque state", SHORT[j]);
+        if (d[0] != 1) return fail(a, SO101_ESTATE, "%s is not already powered", SHORT[j]);
+        if (so101_sts_read(&a->hal, id, STS_ACCELERATION, d, 1))
+            return fail(a, SO101_EIO, "cannot read %s acceleration", SHORT[j]);
+        if (d[0] != a->acceleration)
+            return fail(a, SO101_ESTATE, "%s acceleration differs; adoption writes no settings", SHORT[j]);
+        if (so101_sts_read(&a->hal, id, STS_TORQUE_LIMIT, d, 2))
+            return fail(a, SO101_EIO, "cannot read %s torque limit", SHORT[j]);
+        int limit = so101_sts_u16(d);
+        if (limit <= 0 || limit > a->torque_limit)
+            return fail(a, SO101_ESTATE, "%s torque limit differs; adoption writes no settings", SHORT[j]);
+    }
+    int raw[SO101_NJ], again[SO101_NJ];
+    if ((rc = read_raw_positions(a, STS_GOAL_POSITION, raw))) return rc;
+    so101_real hardware[SO101_NJ], wanted[SO101_NJ], actual[SO101_NJ];
+    for (int j = 0; j < SO101_NJ; j++) {
+        if (raw[j] < a->cal[j].range_min || raw[j] > a->cal[j].range_max)
+            return fail(a, SO101_ESTATE, "%s hardware goal is outside its calibration", SHORT[j]);
+        wanted[j] = hardware[j] = from_raw(&a->cal[j], j, raw[j]);
+    }
+    /* The servo's Goal_Position already includes feedforward and any earlier
+     * lead. Absorb the latter into wanted; a new lead accumulator starts at zero. */
+    if (a->sag > 0) {
+        so101_pose p;
+        for (int k = 0; k < 20; k++) {
+            so101_pose_eval(&a->model, wanted, &p);
+            for (int j = SO101_LIFT; j <= SO101_ROLL; j++) {
+                wanted[j] = hardware[j] - a->sag * p.torque[j];
+                if (!isfinite(wanted[j]))
+                    return fail(a, SO101_ESTATE, "nonfinite %s existing goal compensation", SHORT[j]);
+            }
+        }
+        so101_pose_eval(&a->model, wanted, &p);
+        for (int j = SO101_LIFT; j <= SO101_ROLL; j++) {
+            int restored = to_raw(&a->cal[j], j, wanted[j] + a->sag * p.torque[j]);
+            if (restored < raw[j]-1 || restored > raw[j]+1)
+                return fail(a, SO101_ESTATE, "cannot invert %s existing goal compensation", SHORT[j]);
+        }
+    }
+    for (int j = 0; j < SO101_NA; j++)
+        if (!isfinite(wanted[j]) || wanted[j] < a->model.lo[j] || wanted[j] > a->model.hi[j])
+            return fail(a, SO101_ESTATE, "%s compensated goal is outside its calibrated range", SHORT[j]);
+    if ((rc = so101_arm_read(a, actual, NULL, NULL))) return rc;
+    if ((rc = read_raw_positions(a, STS_GOAL_POSITION, again))) return rc;
+    if (memcmp(raw, again, sizeof raw))
+        return fail(a, SO101_ESTATE, "hardware goals changed during adoption; another driver may be active");
+    memcpy(a->goal, wanted, sizeof a->goal);
+    memset(a->lead, 0, sizeof a->lead);
+    a->have_pose = 0;
+    a->have_target = 0;
+    so101_real dl = actual[SO101_LIFT] - (a->model.lo[SO101_LIFT] + FOLD_LIFT);
+    so101_real de = actual[SO101_ELBOW] - (a->model.hi[SO101_ELBOW] - FOLD_ELBOW);
+    a->folded = RFABS(dl) < FOLDED_WITHIN && RFABS(de) < FOLDED_WITHIN;
+    if (a->folded) memcpy(a->start, actual, sizeof a->start);
+    else {
+        a->start[SO101_ROLL] = wanted[SO101_ROLL];
+        a->start[SO101_GRIP] = wanted[SO101_GRIP];
+    }
+    a->torque = 1;
+    say(a, "adopted powered servos without writes; existing hardware goals retained");
+    return SO101_OK;
+}
+
 /* ---- moves ----------------------------------------------------------------------------------- */
 
 static so101_real minjerk(so101_real t) {

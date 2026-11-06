@@ -61,6 +61,56 @@ static void ready_arm(so101_sim *s, so101_arm *a) {
     CHECK(so101_arm_unfold(a) == SO101_OK, "unfold: %s", a->err);
 }
 
+static void powered_adoption(void) {
+    so101_sim s;
+    so101_arm previous, resumed;
+    ready_arm(&s, &previous);
+    so101_real goal[NS];
+    memcpy(goal, previous.goal, sizeof goal);
+    goal[SO101_LIFT] += 12;
+    goal[SO101_ELBOW] -= 12;
+    CHECK(!so101_arm_move_joints(&previous, goal, 30, 0), "adoption setup: %s", previous.err);
+    uint8_t saved[NS][56];
+    for (int j = 0; j < NS; j++) {
+        s.lo_block[j] = s.hi_block[j] = (int)lround(s.pos[j]);
+        memcpy(saved[j], s.reg[j], sizeof saved[j]);
+    }
+    so101_arm_init(&resumed, &previous.hal, previous.cal);
+    /* The new driver has sag enabled; existing hardware goals must not get it twice. */
+    CHECK(!so101_arm_adopt_powered(&resumed), "adopt powered: %s", resumed.err);
+    CHECK(resumed.torque && !resumed.have_pose, "adoption did not set powered/unknown pose state");
+    for (int j = 0; j < NS; j++)
+        CHECK(!memcmp(saved[j], s.reg[j], sizeof saved[j]), "adoption wrote servo %d control registers", j);
+    memcpy(goal, resumed.goal, sizeof goal);
+    CHECK(!so101_arm_move_joints(&resumed, goal, 30, 0), "hold adopted goals: %s", resumed.err);
+    for (int j = 0; j < NS; j++) {
+        int before = saved[j][42] | saved[j][43] << 8;
+        int after = s.reg[j][42] | s.reg[j][43] << 8;
+        CHECK(abs(before-after) <= 1, "adopted hold changed servo %d hardware goal by %d steps", j, after-before);
+    }
+    CHECK(so101_arm_adopt_powered(&resumed) == SO101_ESTATE, "adoption accepted a driver already in control");
+    CHECK(!so101_arm_torque_off(&resumed), "adoption torque off failed");
+    CHECK(so101_arm_adopt_powered(&resumed) == SO101_ESTATE && !resumed.torque,
+          "adoption accepted unpowered motors");
+    for (int j = 0; j < NS; j++) s.reg[j][40] = 1;
+    s.reg[SO101_LIFT][40] = 0;
+    CHECK(so101_arm_adopt_powered(&resumed) == SO101_ESTATE && !resumed.torque,
+          "adoption accepted one unpowered motor");
+    s.reg[SO101_LIFT][40] = 1;
+    s.reg[SO101_LIFT][41] = 0;
+    CHECK(so101_arm_adopt_powered(&resumed) == SO101_ESTATE && !resumed.torque,
+          "adoption accepted changed acceleration");
+    CHECK(s.reg[SO101_LIFT][41] == 0, "adoption rewrote incompatible acceleration");
+    s.reg[SO101_LIFT][41] = (uint8_t)resumed.acceleration;
+    resumed.sag = NAN;
+    CHECK(so101_arm_adopt_powered(&resumed) == SO101_ESTATE && !resumed.torque,
+          "adoption accepted nonfinite compensation");
+    resumed.sag = (so101_real)3.7;
+    resumed.model.lo[SO101_LIFT] = resumed.model.hi[SO101_LIFT] = 0;
+    CHECK(so101_arm_adopt_powered(&resumed) == SO101_ESTATE && !resumed.torque,
+          "adoption accepted an effective goal outside the model range");
+}
+
 /* A chain of n poses, 2 mm apart, from the arm's pose along d (m) at a pitch. */
 static int line(so101_arm *a, const so101_model *m0, const so101_real d[3], so101_real pitch, so101_real (*q)[NS], int n) {
     so101_model m = *m0;
@@ -149,6 +199,7 @@ static void grip_guards(void) {
 
 int main(int argc, char **argv) {
     verbose = argc > 1;
+    powered_adoption();
     grip_guards();
     const char *kind = sizeof(so101_real) == 4 ? "float" : "double";
     static so101_sim s;

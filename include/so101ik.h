@@ -293,6 +293,9 @@ int so101_arm_read(so101_arm *a, so101_real pos[SO101_NJ], so101_real load[SO101
  * torque off the arm can be moved by hand meanwhile. deg (calibrated degrees) and pitch may be NULL. */
 int so101_arm_where(so101_arm *a, so101_real deg[SO101_NJ], so101_real tip[3], so101_real *pitch);
 int so101_arm_torque_on(so101_arm *a);         /* goals = present positions, RAM settings, torque on */
+/* Attach to already powered servos without writing any register. Validate calibration and RAM settings,
+ * retain hardware goals, and invert sag compensation so the next command does not add it twice. */
+int so101_arm_adopt_powered(so101_arm *a);
 int so101_arm_torque_off(so101_arm *a);
 int so101_arm_move_joints(so101_arm *a, const so101_real target[SO101_NJ], so101_real speed, int check);   /* deg/s */
 int so101_arm_move_to(so101_arm *a, const so101_real xyz[3], const so101_real *pitch, so101_real speed);   /* deg/s */

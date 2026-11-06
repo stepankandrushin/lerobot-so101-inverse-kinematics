@@ -113,6 +113,16 @@ elbow within 10 of 3 inside its folded end), else that fold from the ranges with
 76.5 degrees down, and roll and gripper as they were. A LeRobot calibration's ranges end where the
 joints were moved to, their stops, so the fold follows each arm's own calibration.
 
+`so101_arm_adopt_powered` resumes already powered servos without writing any register.
+It checks calibration, torque enables, acceleration and torque limits, and reads hardware
+goals twice to refuse a concurrent writer. It inverts the configured sag compensation so
+the next command does not apply it twice; previous lead is absorbed into the effective
+goal and the new lead accumulator is zero. Unpowered motors, nonfinite compensation or
+goals outside the calibrated ranges refuse without changing the powered state. The caller
+must close the former driver and check a recovery path from both measured joints and the
+adopted effective goal. `torque_on` resets goals to present positions and is unsuitable
+for preserving a suspended arm's existing holding effort.
+
 - One sync read a tick gets position, load and current of all six servos (registers 56 to 70, 2.2
   ms on an M1 Mac). The registers and sign bits are LeRobot's
   (lerobot/motors/feetech/tables.py): position sign at bit 15, load at bit 10, Homing_Offset at 11;
