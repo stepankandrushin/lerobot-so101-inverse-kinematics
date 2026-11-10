@@ -1,13 +1,13 @@
 # Measurements
 
-On an Apple M1 MacBook Air (macOS 27), 2026-10-14. `make test` and tools/bench.py print them again on
+On an Apple M1 MacBook Air (macOS 27). `make test` and tools/bench.py print them again on
 another machine; the arm's runs need an arm.
 
 ## Against LeRobot's RobotKinematics (tools/bench.py)
 
 `uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-tinyxml2<11'
 tools/bench.py --lerobot CLONE --lerobot061 FILE`: placo 0.9.15 with LeRobot's pins, LeRobot's solver
-from its main branch (kinematics.py as of ae2b57f12, 2026-10-13: 8 placo Newton steps a call) and from
+from its main branch (kinematics.py as of ae2b57f12: 8 placo Newton steps a call) and from
 LeRobot 0.6.1 (one step a call), so101ik's drop-in RobotKinematics; the same joints and targets, the
 calls interleaved in one process, the median of 5 rounds:
 
@@ -91,7 +91,7 @@ the same x, y, z and pitch as examples/where.py with the calibration file: 163.8
 
 ### The limits (the same follower, 12 V STS3215, 12.4 V at the servos)
 
-Measured before this library, with the Python driver it was ported from, on 2026-10-08:
+Measured before this library, with the Python driver it was ported from:
 
 - A goal step on one joint at a time from the arm stretched out, read at 380 Hz: peak 166-197
   degrees/s at Torque_Limit 500 (127 for the lift and elbow going up), 254-304 at 1000. Torque_Limit
@@ -130,7 +130,7 @@ roll at -89:
 ### On the arm: the heart (media/heart.gif, media/heart.jpg)
 
 examples/figures/heart.py --size 30, facing the camera that filmed it (1.6 m away, 56 degrees to the
-arm's left, 28 up), the gripper pitch that makes a lap shortest, on 2026-10-15. Offsets 2.3, -5.9
+arm's left, 28 up), the gripper pitch that makes a lap shortest. Offsets 2.3, -5.9
 and -3.0 degrees on lift, elbow and wrist flex. The arm stood folded at torque-on and took the fast
 way out and back each time.
 
