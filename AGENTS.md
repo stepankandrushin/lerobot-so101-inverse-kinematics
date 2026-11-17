@@ -1,9 +1,9 @@
-# so101ik (lerobot-so101-inverse-kinematics)
+# so101ik lerobot-so101-inverse-kinematics
 
-The SO-101 follower arm (SO-ARM100/101, LeRobot's) in C: the least-loaded inverse kinematics, a local
+The SO-101 follower arm SO-ARM100/101 LeRobot's in C: the least-loaded inverse kinematics, a local
 solver that answers LeRobot's RobotKinematics calls, the mesh collision check, and the arm's driver
-(Feetech STS servos, moves that stop on a stall or an overload). C99, no allocation, the board behind
-a small HAL; a Python binding, `so101ik`, for macOS and Linux; an ESP32 next (agents/esp32.md).
+(Feetech STS servos, moves that stop on a stall or an overload). C99 no allocation, the board behind
+a small HAL; a Python binding, `so101ik` for macOS and Linux; an ESP32 next agents/esp32.md
 README.md is for the people who use it, this file for whoever changes it.
 
 **This repo is public.** Host names, addresses, the paths of one machine, and anything about one
@@ -28,50 +28,50 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
     tools/bench.py --lerobot CLONE [--lerobot061 FILE] [--urdf FILE]   # against LeRobot's solver
 ```
 
-- The environment Arm reads: SO101_PORT, SO101_CALIBRATION and SO101_OFFSETS; without the first two
-  it finds the port and LeRobot's calibration file itself (README.md, The port and the calibration).
-  The offsets are the arm's, so they live in ID.offsets beside its ID.json (offsets_file); SO101_OFFSETS
+- The environment Arm reads: SO101_PORT SO101_CALIBRATION and SO101_OFFSETS without the first two
+  it finds the port and LeRobot's calibration file itself README.md The port and the calibration.
+  The offsets are the arm's, so they live in ID.offsets beside its ID.json offsets_file SO101_OFFSETS
   overrides the file for one shell.
 - A run leaves outputs/so101ik/NAME.csv (every tick) and NAME.log under the directory it ran from;
   outputs/ is git-ignored.
 
 ## Layout
 
-- include/so101ik.h: the whole C API. src/: kin.c (forward kinematics, torques, rules, collision
+- include/so101ik.h the whole C API. src/ kin.c (forward kinematics, torques, rules, collision
   check), ik.c (the IK and the local solver), path.c (fast runs planned: poses along a path, the
   timing, the ticks, the fastest pitch, learning, the way out of the rest pose), sts.c and sts.h (the
   servos' packets), arm.c (the moves), fast.c (fast runs driven), hal_posix.c (the serial port on
-  macOS and Linux), sim.c (simulated servos behind a so101_hal, port "sim"), model.c (generated),
+  macOS and Linux), sim.c (simulated servos behind a so101_hal port "sim"), model.c (generated),
   so101ik_internal.h (what the sources share).
-- python/so101ik/: __init__.py (Arm, Model, RobotKinematics, the port and calibration search),
-  fast.py (fast runs: Run, closed_run, join, check, and what Arm.run and the way home call),
-  figures.py (a figure's coordinates into a plane, the examples' command line, the dance), _core.c,
+- python/so101ik/ __init__.py (Arm, Model, RobotKinematics, the port and calibration search),
+  fast.py (fast runs: Run, closed_run join, check, and what Arm.run and the way home call),
+  figures.py (a figure's coordinates into a plane, the examples' command line, the dance), _core.c
   _arm.c and _path.c (the CPython binding; _path.c is path.c on numpy arrays). setup.py builds them
-  with src/.
-- tools/: gen_model.py (src/model.c from the URDF and its meshes), bench.py, run_stats.py.
-  test/test.c and test/test_arm.c (the moves on sim.c) are make test. examples/: triangle.py (the arm), where.py and where.c (the tip live, torque off), kinematics.py and
-  ik.c (no arm), figures/ (one script a figure, show.py, dance.py).
-- media/: the README's pictures. .github/workflows/test.yml: make test, make example, the Python
+  with src/
+- tools/ - gen_model.py src/model.c from the URDF and its meshes, bench.py run_stats.py
+  test/test.c and test/test_arm.c the moves on sim.c are make test. examples/ - triangle.py (the arm), where.py and where.c (the tip live, torque off), kinematics.py and
+  ik.c (no arm), figures/ one script a figure, show.py dance.py
+- media/ the README's pictures. .github/workflows/test.yml make test, make example, the Python
   binding and `uv build` on Linux and macOS.
 
 ## Rules and traps
 
 - src/model.c is generated: `make model` after the URDF or its meshes change, never an edit by hand.
-  The URDF is SO-ARM100's Simulation/SO101/so101_new_calib.urdf: SO101_URDF, else ../SO-ARM100.
-- After a change in src/: `make test` (single precision is what an ESP32 runs, and must give what
-  double gives) and `make example`.
-- Every exported C name starts with so101_ or SO101_: SO_ is the sockets' namespace (SO_REUSEADDR,
+  The URDF is SO-ARM100 Simulation/SO101/so101_new_calib.urdf - SO101_URDF else ../SO-ARM100
+- After a change in src/ `make test` (single precision is what an ESP32 runs, and must give what
+  double gives) and `make example`
+- Every exported C name starts with so101_ or SO101_ - SO_ is the sockets' namespace (SO_REUSEADDR
   SO_ERROR), which an ESP32 firmware with Wi-Fi includes.
-- Arm never falls back to the calibration compiled into model.c (SO101_DEFAULT_CAL): it is another
+- Arm never falls back to the calibration compiled into model.c SO101_DEFAULT_CAL - it is another
   arm's, and the servos' EEPROM would refuse it. Model may, since it moves nothing.
 - The offsets are 0 by default, the URDF as LeRobot takes it; the start pose is the arm's own
-  (agents/design.md, The arm). Nothing in the library may assume one particular arm's numbers.
-- The offsets file is ID.offsets, never a .json: find_calibration takes the one .json in so_follower/,
+  agents/design.md The arm. Nothing in the library may assume one particular arm's numbers.
+- The offsets file is ID.offsets, never a .json: find_calibration takes the one .json in so_follower/
   and a second would stop every Arm() that relies on it.
 - find_port opens every candidate port when there are several and reads the servos' EEPROM: reads
   only, never a write, since one of them may be a leader arm or another device.
-- uv rebuilds the extension when a .c or .h changes (cache-keys in pyproject.toml). The .so lands in
-  python/so101ik/, git-ignored.
+- uv rebuilds the extension when a .c or .h changes cache-keys in pyproject.toml The .so lands in
+  python/so101ik/ git-ignored.
 - MANIFEST.in puts the headers into the sdist (setuptools takes only the .c files it compiles): a new
   header or file the build needs goes there too, or a wheel from the sdist fails. CI's `uv build` checks it.
 - The IK keeps its samples in static memory and its plane in the model: one thread at a time.
@@ -79,36 +79,36 @@ uv run --with 'placo>=0.9.6,<0.9.16' --with 'cmeel-urdfdom>=4,<5' --with 'cmeel-
   one run to the next: compare speeds in one process with the calls interleaved, as bench.py does.
 - One program on a servo bus at a time: LeRobot's and this driver's packets collide.
 - Every Arm call is one command with its data, run whole by the C library: no Python steers a move
-  while it runs (callbacks only watch: log, on_tick; stop() asks), so the same calls can later go to a
-  board over a link (agents/esp32.md). A new move takes its data at the start and runs in arm.c.
+  while it runs (callbacks only watch: log, on_tick stop() asks), so the same calls can later go to a
+  board over a link agents/esp32.md A new move takes its data at the start and runs in arm.c
 - The binding lets go of the GIL while it sleeps or waits on the port, and one call at a time has the
-  port (take/TAKE in _arm.c): another thread's call fails, a call from inside a move (a signal handler,
+  port take/TAKE in _arm.c - another thread's call fails, a call from inside a move (a signal handler,
   on_tick) may only switch the torque off.
-- Arm's subclasses (other programs' own arms) override unfold, lost and unfold_first: a private helper
+- Arm's subclasses (other programs' own arms) override unfold, lost and unfold_first a private helper
   of Arm's named like a method of theirs replaces it, so keep Arm's own helpers few and underscored.
-- A fast run's limits (so101_fast_init: 220 degrees/s, 1500 degrees/s^2, a lag of 60 ms behind 22)
-  were measured on one 12 V follower at Torque_Limit 1000 and Acceleration 0 (agents/measurements.md).
+- A fast run's limits so101_fast_init - 220 degrees/s 1500 degrees/s^2 a lag of 60 ms behind 22
+  were measured on one 12 V follower at Torque_Limit 1000 and Acceleration 0 agents/measurements.md
   A change to them, to the stop rules or to so101_unfold_path is a change to what the arm does at
   full torque: try it at `--speed 0.5` first.
-- A fast run leaves the servos at Torque_Limit 1000 and Acceleration 0 until so101_arm_fast(.., 0);
+- A fast run leaves the servos at Torque_Limit 1000 and Acceleration 0 until so101_arm_fast 0
   Arm puts them back before any other move, after a stop and on the way home, and torque_on writes
   500 and 254 where a killed run left them.
 - The fast way out of the rest pose and back is only taken where the model clears it with joints 6
-  degrees off (so101_unfold_clear). With zero offsets the folded gripper lies on the table in the
+  degrees off so101_unfold_clear With zero offsets the folded gripper lies on the table in the
   model, so it is refused there and the arm unfolds the slow way: that is by design, not a bug.
 - No script in examples/figures/ may have a standard-library module's name (wave.py would replace
-  the module `wave` in the process): the waves are waves.py.
+  the module `wave` in the process): the waves are waves.py
 
 ## Docs
 
-- agents/design.md: how the model, the IK, the collision check, the local solver and the driver
-  work. Read it before changing src/.
-- agents/measurements.md: against LeRobot's solver, float against double, a run on the arm.
-- agents/esp32.md: the plan for an ESP32: which one, memory and time, the HAL, the bus, commands over
+- agents/design.md how the model, the IK, the collision check, the local solver and the driver
+  work. Read it before changing src/
+- agents/measurements.md - against LeRobot's solver, float against double, a run on the arm
+- agents/esp32.md the plan for an ESP32 which one, memory and time, the HAL, the bus, commands over
   Wi-Fi, Bluetooth or buttons.
 
 ## Editing rules
 
-Current state goes in this file and agents/, in plain sentences with the reason for each rule; what
+Current state goes in this file and agents/ in plain sentences with the reason for each rule; what
 was done when, and why, in commit messages. Keep this file under 12 KB: a rule here in a sentence or
-two, its long form in agents/.
+two, its long form in agents/
